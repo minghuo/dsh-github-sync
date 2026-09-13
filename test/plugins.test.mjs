@@ -4,7 +4,8 @@ import fsp from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { diffProfilePlugins, installCommand, readAllProfiles, readProfilePlugins } from '../src/plugins.js'
+import * as pluginInternals from '../src/plugins.js'
+import { compareVersions, diffProfilePlugins, installCommand, planPluginActions, readAllProfiles, readProfilePlugins } from '../src/plugins.js'
 
 /** A profile directory with a manifest and (optionally) installed packages. */
 async function makeProfile(home, profile, { dependencies = {}, bundles = [], installed = {} } = {}) {
@@ -84,6 +85,50 @@ test('diffProfilePlugins reports a profile that exists on only one side', () => 
   assert.deepEqual(desktop.missing, [])
   const web = onlyCloud.profiles.find((p) => p.profile === 'web')
   assert.deepEqual(web.missing.map((p) => p.name), ['a'])
+})
+
+test('compareVersions orders numeric parts, not strings', () => {
+  assert.equal(compareVersions('1.10.0', '1.9.9'), 1)
+  assert.equal(compareVersions('0.1.0', '0.1.0'), 0)
+  assert.equal(compareVersions('2.0.0', '2.0.1'), -1)
+  assert.equal(compareVersions('^1.2.3', '1.2.3'), 0, 'range prefixes are ignored')
+  assert.equal(compareVersions('1.2', '1.2.0'), 0)
+})
+
+test('planPluginActions installs what is missing and updates only what is older', () => {
+  const local = [
+    { profile: 'web', packages: [
+      { name: 'same', spec: '^1.0.0', installedVersion: '1.0.0', bundle: true },
+      { name: 'older', spec: '^1.0.0', installedVersion: '1.0.0', bundle: false },
+      { name: 'newer', spec: '^3.0.0', installedVersion: '3.0.0', bundle: false },
+    ] },
+  ]
+  const cloud = {
+    web: { packages: [
+      { name: 'same', spec: '^1.0.0' },
+      { name: 'older', spec: '^2.0.0' },
+      { name: 'newer', spec: '^2.9.0' },
+      { name: 'absent-here', spec: '^4.2.0' },
+    ] },
+  }
+
+  const { actions } = planPluginActions(local, cloud)
+  assert.deepEqual(
+    actions.map((a) => `${a.kind}:${a.name}@${a.to ?? a.from}`),
+    ['install:absent-here@4.2.0', 'update:older@2.0.0'],
+    'a package this machine already leads is never downgraded',
+  )
+  const update = actions.find((a) => a.kind === 'update')
+  assert.equal(update.from, '1.0.0')
+  assert.equal(update.command, 'dsh plugin --profile web add older@2.0.0')
+  assert.equal(update.arg, 'older@2.0.0')
+})
+
+test('packageSpecArg keeps a git source instead of inventing a version', () => {
+  const { packageSpecArg } = pluginInternals
+  assert.equal(packageSpecArg({ name: 'x', spec: '^1.2.3' }), 'x@1.2.3')
+  assert.equal(packageSpecArg({ name: 'x', spec: 'github:owner/x' }), 'github:owner/x')
+  assert.equal(packageSpecArg({ name: 'x' }), 'x')
 })
 
 test('installCommand pins the version the backup recorded', () => {

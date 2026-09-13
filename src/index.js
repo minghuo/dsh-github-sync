@@ -29,6 +29,7 @@
 
 import fs from 'node:fs'
 import fsP from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
@@ -37,7 +38,7 @@ import zlib from 'node:zlib'
 
 import { dshHome, displayPath, decodeWorkspaceKey, listProfiles, listWorkspaceDirs, workspacePathMap } from './paths.js'
 import { createGithubClient, parseRepoUrl, repoSlug } from './github.js'
-import { diffProfilePlugins, installCommand, readAllProfiles } from './plugins.js'
+import { diffProfilePlugins, installCommand, planPluginActions, readAllProfiles } from './plugins.js'
 import {
   MANIFEST_NAME,
   buildPlan,
@@ -71,7 +72,7 @@ const API_PREFIX = `/${NAME}/api`
  * it, and the only way for the client to notice is for the host to say what it
  * speaks.
  */
-const API_VERSION = 2
+const API_VERSION = 3
 
 /** This package's own version, for the "your host half is old" message. */
 function ownVersion() {
@@ -812,8 +813,42 @@ export function apply(ctx, config = {}) {
       diff,
       own: ownDiff.profiles,
       suggestions,
+      // install + update, computed here so a client can never ask for an
+      // arbitrary command to be run.
+      actions: planPluginActions(local, others).actions,
       instances: inventory.instances.map((i) => i.instanceId),
     }
+  }
+
+  /**
+   * Run `dsh plugin --profile <p> add <arg>` for one package.
+   *
+   * The dsh entry point is invoked with the current node binary rather than
+   * through a shell, so this behaves the same on Windows and POSIX and cannot
+   * be influenced by PATH.
+   */
+  function addPlugin(profile, arg, timeoutMs = 300_000) {
+    const bin = process.argv[1]
+    return new Promise((resolve) => {
+      const child = bin && bin.endsWith('.js')
+        ? spawn(process.execPath, [bin, 'plugin', '--profile', profile, 'add', arg], { windowsHide: true })
+        : spawn('dsh', ['plugin', '--profile', profile, 'add', arg], { windowsHide: true, shell: true })
+      let output = ''
+      const collect = (chunk) => {
+        output = (output + chunk.toString()).slice(-16 * 1024)
+      }
+      child.stdout.on('data', collect)
+      child.stderr.on('data', collect)
+      const timer = setTimeout(() => child.kill(), timeoutMs)
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        resolve({ code: code === null ? -1 : code, output })
+      })
+      child.on('error', (error) => {
+        clearTimeout(timer)
+        resolve({ code: -1, output: String((error && error.message) || error) })
+      })
+    })
   }
 
   /**
@@ -937,6 +972,54 @@ export function apply(ctx, config = {}) {
                 instanceId: await ensureInstanceId(),
               })
               sendJson(res, 200, report)
+              return
+            }
+
+            // POST /plugins/apply { names?, profiles?, dryRun? } — actually run
+            // the install/update commands the plugin page used to only print
+            if (method === 'POST' && route === `${API_PREFIX}/plugins/apply`) {
+              const body = await readJsonBody(req)
+              const { settings, parsed, client } = await requireClient()
+              const report = await pluginReport({
+                client,
+                owner: parsed.owner,
+                repo: parsed.repo,
+                branch: settings.branch || 'main',
+                instanceId: await ensureInstanceId(),
+              })
+              const names = Array.isArray(body.names) && body.names.length ? new Set(body.names) : null
+              const profiles = Array.isArray(body.profiles) && body.profiles.length ? new Set(body.profiles) : null
+              const targets = report.actions.filter(
+                (action) => (!names || names.has(action.name)) && (!profiles || profiles.has(action.profile)),
+              )
+              if (body.dryRun === true) {
+                sendJson(res, 200, { dryRun: true, actions: targets })
+                return
+              }
+              if (targets.length === 0) {
+                sendJson(res, 200, { applied: [], note: '没有需要安装或更新的插件' })
+                return
+              }
+
+              const watch = beginProgress('install')
+              const applied = []
+              try {
+                for (let i = 0; i < targets.length; i += 1) {
+                  const action = targets[i]
+                  watch.phase('安装插件', { done: i, total: targets.length, current: action.command })
+                  const run = await addPlugin(action.profile, action.arg)
+                  applied.push({ ...action, ok: run.code === 0, code: run.code, output: run.output.split(/\r?\n/).filter(Boolean).slice(-6).join('\n') })
+                  log.info(`插件${action.kind === 'install' ? '安装' : '更新'}：${action.command} → ${run.code === 0 ? '成功' : `失败(${run.code})`}`)
+                }
+                watch.phase('安装插件', { done: targets.length, total: targets.length })
+              } finally {
+                watch.end()
+              }
+              sendJson(res, 200, {
+                applied,
+                restartRequired: applied.some((a) => a.ok),
+                note: applied.some((a) => a.ok) ? '安装/更新完成：重启 dsh web 后新插件才会挂载。' : undefined,
+              })
               return
             }
 

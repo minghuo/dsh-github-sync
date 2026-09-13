@@ -183,6 +183,12 @@ const ZH = {
   pluginsMissingTitle: '云端有、本机没有的插件',
   pluginsMissingHint: '这些是别的机器在用的插件，按对应命令安装后重启 dsh web 生效。',
   pluginsMissingNone: '没有缺失的插件——本机与云端的插件清单一致。',
+  installAction: '安装',
+  updateAction: '更新',
+  applyAll: '全部同步',
+  applyDone: '已处理',
+  applyNone: '没有需要安装或更新的插件',
+  applyRestart: '重启 dsh web 后生效',
   copy: '复制',
   copyCommand: '已复制命令',
   hostOutdated: '宿主半边是旧版本（v{version}，接口 {api}）：插件清单、与云端比较、进度显示需要重启 dsh web 才会出现——宿主代码只在进程启动时加载，刷新页面不会更新它。',
@@ -327,6 +333,12 @@ const EN = {
   pluginsMissingTitle: 'In the cloud, missing here',
   pluginsMissingHint: 'Plugins another machine uses. Run the matching command, then restart dsh web.',
   pluginsMissingNone: 'Nothing missing — this machine and the cloud declare the same plugins.',
+  installAction: 'Install',
+  updateAction: 'Update',
+  applyAll: 'Sync all',
+  applyDone: 'Handled',
+  applyNone: 'Nothing to install or update',
+  applyRestart: 'restart dsh web to apply',
   copy: 'Copy',
   copyCommand: 'Command copied',
   hostOutdated: 'The host half is an older build (v{version}, api {api}): the plugin inventory, cloud comparison and progress display need a dsh web restart — host code only loads when the process starts, refreshing the page does not update it.',
@@ -485,6 +497,7 @@ function SettingsSection({ t }) {
   const [progress, setProgress] = useState(null)
   const [plugins, setPlugins] = useState(null)
   const [compare, setCompare] = useState(null)
+  const [applyResult, setApplyResult] = useState(null)
   const [verifyResult, setVerifyResult] = useState(null)
   const toastTimer = useRef(null)
 
@@ -498,6 +511,9 @@ function SettingsSection({ t }) {
    * that depends on it, because a dependency array is evaluated during render.
    */
   const hostIsCurrent = hostSupportsApi(status)
+  // Running install/update needs the newer route; an older host still gets the
+  // copyable commands, just not the buttons.
+  const canApplyPlugins = hostSupportsApi(status, 3)
 
   const notify = (message) => {
     setToast(message)
@@ -659,6 +675,23 @@ function SettingsSection({ t }) {
     setCompare(await get('/compare'))
   })
 
+  /**
+   * Run the install/update commands the page lists — all of them, or one.
+   * The host decides *what* may be run from the backup's manifests; this only
+   * says which of them the user asked for.
+   */
+  const applyPlugins = (action) => run('apply', async () => {
+    const result = await post('/plugins/apply', action ? { names: [action.name], profiles: [action.profile] } : {})
+    setApplyResult(result)
+    await loadPlugins()
+    const done = (result.applied || []).filter((a) => a.ok).length
+    notify(
+      (result.applied || []).length
+        ? `${t('applyDone')}：${done}/${result.applied.length}${done ? ` · ${t('applyRestart')}` : ''}`
+        : result.note || t('applyNone'),
+    )
+  })
+
   const pull = (groups, paths) => run('pull', async () => {
     const result = await post('/pull', { instanceId: (status && status.instanceId) || undefined, groups, paths })
     await Promise.all([loadLocalSessions(), loadStatus(), loadCompare()])
@@ -725,6 +758,9 @@ function SettingsSection({ t }) {
   const settings = visibleSettings(status, draft)
   const configured = status ? status.configured : false
   const localWorkspaces = (localSessions && localSessions.workspaces) || []
+  // `actions` carries install *and* update; `suggestions` is the install-only
+  // shape a version-2 host returns.
+  const pluginActions = (plugins && (plugins.actions || plugins.suggestions)) || []
 
   return h('div', { className: 'dgs-root' },
     h('header', { className: 'dgs-head' },
@@ -1061,26 +1097,54 @@ function SettingsSection({ t }) {
                     pkg.bundle ? h('span', { className: 'dgs-pill' }, t('pluginsBundleTag')) : null,
                     h('span', { className: 'dgs-hint' }, pkg.spec))))))),
 
-      h(Card, { title: t('pluginsMissingTitle'), hint: t('pluginsMissingHint') },
+      h(Card, {
+        title: t('pluginsMissingTitle'),
+        hint: t('pluginsMissingHint'),
+        actions: canApplyPlugins && pluginActions.length
+          ? [h(Button, { key: 'all', variant: 'primary', size: 'sm', disabled: busy !== '', onClick: () => applyPlugins(null) }, t('applyAll'))]
+          : null,
+      },
         !plugins
           ? h('p', { className: 'dgs-hint' }, t('loading'))
-          : (plugins.suggestions || []).length === 0
+          : pluginActions.length === 0
             ? h('p', { className: 'dgs-hint' }, t('pluginsMissingNone'))
-            : plugins.suggestions.map((item) =>
-              h('div', { key: `${item.profile}/${item.name}`, className: 'dgs-list-item' },
+            : pluginActions.map((item) =>
+              h('div', { key: `${item.profile}/${item.name}/${item.kind}`, className: 'dgs-list-item' },
                 h('div', { className: 'dgs-row dgs-between' },
                   h('span', null,
                     h('span', { className: 'dgs-strong' }, item.name),
-                    h('span', { className: 'dgs-hint' }, ` · ${item.profile} · ${item.spec}`)),
-                  h(Button, {
-                    variant: 'outline',
-                    size: 'sm',
-                    onClick: () => {
-                      writeClipboard(item.command)
-                      notify(`${t('copyCommand')}：${item.command}`)
-                    },
-                  }, t('copy'))),
+                    h('span', { className: 'dgs-hint' },
+                      ` · ${item.profile} · `,
+                      item.kind === 'install'
+                        ? `${t('installAction')} ${item.spec}`
+                        : `${t('updateAction')} ${item.from} → ${item.to}`)),
+                  h('span', { className: 'dgs-row' },
+                    canApplyPlugins
+                      ? h(Button, {
+                        variant: 'primary',
+                        size: 'sm',
+                        disabled: busy !== '',
+                        onClick: () => applyPlugins(item),
+                      }, item.kind === 'install' ? t('installAction') : t('updateAction'))
+                      : null,
+                    h(Button, {
+                      variant: 'outline',
+                      size: 'sm',
+                      onClick: () => {
+                        writeClipboard(item.command)
+                        notify(`${t('copyCommand')}：${item.command}`)
+                      },
+                    }, t('copy')))),
                 h('code', { className: 'dgs-code' }, item.command)))),
+
+      applyResult
+        ? h('div', { className: applyResult.applied.every((a) => a.ok) ? 'dgs-note dgs-ok' : 'dgs-note dgs-warn' },
+          applyResult.applied.map((a) =>
+            h('div', { key: `${a.profile}/${a.name}/${a.kind}` },
+              `${a.ok ? '✔' : '✘'} ${a.command}`,
+              a.ok ? '' : h('pre', { className: 'dgs-code' }, a.output))),
+          applyResult.note ? h('div', { className: 'dgs-hint' }, applyResult.note) : null)
+        : null,
 
       plugins && plugins.configured === false
         ? h('p', { className: 'dgs-hint' }, t('notConfigured'))

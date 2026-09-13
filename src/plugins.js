@@ -121,13 +121,104 @@ export function diffProfilePlugins(local, cloud = {}) {
   return { profiles: result }
 }
 
+/** The version a range spec points at (`^2.4.2` → `2.4.2`), or undefined. */
+export function versionFromSpec(spec) {
+  const version = String(spec || '').replace(/^[\^~>=<\s]+/, '')
+  return /^\d/.test(version) ? version : undefined
+}
+
 /**
  * The command that brings one backup-declared plugin onto this machine.
  * Versions are pinned to what the backup recorded, so a restore reproduces the
  * machine it came from rather than drifting to the latest release.
  */
 export function installCommand(profile, pkg) {
-  const version = String(pkg.spec || '').replace(/^[\^~>=<\s]+/, '')
-  const spec = version && /^\d/.test(version) ? `${pkg.name}@${version}` : pkg.name
-  return `dsh plugin --profile ${profile} add ${spec}`
+  const version = versionFromSpec(pkg.spec)
+  return `dsh plugin --profile ${profile} add ${version ? `${pkg.name}@${version}` : pkg.name}`
+}
+
+/** Numeric parts of a version, so `1.10.0` compares greater than `1.9.9`. */
+function versionParts(value) {
+  return String(value || '')
+    .replace(/^[^\d]*/, '')
+    .split(/[.+-]/)
+    .slice(0, 4)
+    .map((part) => Number.parseInt(part, 10) || 0)
+}
+
+/** `1` when `a` is newer than `b`, `-1` when older, `0` when equal. */
+export function compareVersions(a, b) {
+  const left = versionParts(a)
+  const right = versionParts(b)
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const l = left[i] || 0
+    const r = right[i] || 0
+    if (l !== r) return l > r ? 1 : -1
+  }
+  return 0
+}
+
+/** Package names a command may be built from. */
+const SAFE_NAME = /^[@a-zA-Z0-9][\w@/.-]*$/
+
+/**
+ * The single argument `add` receives.
+ *
+ * A version range becomes `name@version`; a git, url or path specification is
+ * passed through as-is (that *is* the source); anything else falls back to the
+ * bare name.
+ */
+export function packageSpecArg({ name, spec } = {}) {
+  const version = versionFromSpec(spec)
+  if (version) return `${name}@${version}`
+  const raw = String(spec || '')
+  if (/^(github:|git\+|https?:|file:|link:|\.{1,2}\/)/.test(raw)) return raw
+  return name
+}
+
+/**
+ * What to do about the plugins another machine declares.
+ *
+ * `install` is a package this machine does not have; `update` is one it has at
+ * a **lower** version than the backup declares. A package this machine already
+ * matches — or leads — is left alone: the goal is to reach the other machine's
+ * state, not to downgrade to it.
+ *
+ * @param {Array} local  `readAllProfiles()` output
+ * @param {object} cloud `{ [profile]: { packages } }` union across other machines
+ * @returns `{ actions }`, each `{ profile, name, kind, from, to, spec, command }`
+ */
+export function planPluginActions(local, cloud = {}) {
+  const actions = []
+  for (const row of diffProfilePlugins(local, cloud).profiles) {
+    for (const pkg of row.added) {
+      if (!SAFE_NAME.test(pkg.name)) continue
+      actions.push({
+        profile: row.profile,
+        name: pkg.name,
+        kind: 'install',
+        to: versionFromSpec(pkg.spec),
+        spec: pkg.spec,
+        arg: packageSpecArg(pkg),
+        command: installCommand(row.profile, pkg),
+      })
+    }
+    for (const pkg of row.changed) {
+      if (!SAFE_NAME.test(pkg.name)) continue
+      const target = versionFromSpec(pkg.cloudSpec)
+      if (!target || !pkg.installedVersion) continue
+      if (compareVersions(target, pkg.installedVersion) <= 0) continue
+      actions.push({
+        profile: row.profile,
+        name: pkg.name,
+        kind: 'update',
+        from: pkg.installedVersion,
+        to: target,
+        spec: pkg.cloudSpec,
+        arg: packageSpecArg({ name: pkg.name, spec: pkg.cloudSpec }),
+        command: installCommand(row.profile, { name: pkg.name, spec: pkg.cloudSpec }),
+      })
+    }
+  }
+  return { actions: actions.sort((a, b) => `${a.profile}/${a.name}`.localeCompare(`${b.profile}/${b.name}`)) }
 }
