@@ -14,6 +14,7 @@
  *   node scripts/publish-github.mjs registry             # PR the market entry
  *
  * Options: --owner <login>  --repo <name>  --private  --branch <name>
+ *          --description <text> (rewrites an existing repo's description)
  *          --upstream <owner/repo> (registry target)
  *
  * The registry step refuses to run while the target repository is younger than

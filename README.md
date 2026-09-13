@@ -108,7 +108,11 @@ dsh plugin --profile web add dsh-github-sync
 GITHUB_TOKEN=github_pat_xxx node scripts/publish-github.mjs repo --owner <你的账号>
 ```
 
-脚本走 GitHub REST（不需要 git 远端，也不读凭据管理器），会建仓库、推送工作树、写入 `dsh-plugin` 等 topics。`--dry-run` 只打印计划；`status` 汇报现状与上架条件。环境里 git 可用时，普通 `git push` 也一样：
+脚本走 GitHub REST（不需要 git 远端，也不读凭据管理器），会建仓库、推送工作树、写入 `dsh-plugin` 等 topics。`--dry-run` 只打印计划；`status` 汇报现状与上架条件；`--description "<一句话>"` 改写已存在仓库的描述。
+
+> ⚠️ 脚本按**工作树内容**直接建提交，不读本地 git 历史。别在工作树有未提交改动时混用两条路，否则远端会多出一个本地没有的提交（`git fetch && git reset --hard origin/main` 可对齐）。日常用 `git push`，脚本只负责 topics / 描述 / 上架。
+
+环境里 git 可用时，普通 `git push` 也一样：
 
 ```bash
 git remote add origin https://github.com/<你的账号>/dsh-github-sync.git
