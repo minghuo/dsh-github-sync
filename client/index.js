@@ -147,6 +147,12 @@ const ZH = {
   restoreNothingToDo: '本地内容与云端完全一致，没有需要写入的文件',
   restoreAllSkipped: '本地已有同名文件且未允许覆盖 —— 打开「覆盖本机同名文件」再试',
   restoreForce: '仍然恢复（本机自己的备份）',
+  restoreTargetHint: '同一项目在两台机器上路径不同时，选本机对应的工作区，恢复的会话就会归到那个分组；留空则保持原来的目录名（可能显示为「未分组」）。',
+  ungroupedTag: '未分组',
+  regroupHint: '移动到',
+  regroupPick: '选择本机工作区…',
+  regroupAction: '归入该分组',
+  regroupDone: '已移动会话',
   snapshotTitle: '本地快照',
   snapshotHint: '快照只存在本机，用于快速回滚；云端备份是另一条独立链路。',
   snapshotNow: '立即快照',
@@ -253,6 +259,12 @@ const EN = {
   restoreNothingToDo: 'local content already matches the backup — nothing to write',
   restoreAllSkipped: 'same-named local files exist and overwriting is off — enable “Overwrite local files” and retry',
   restoreForce: 'Restore anyway (this is my own backup)',
+  restoreTargetHint: 'When the same project lives at a different path here, pick this machine\'s workspace and the restored sessions join that group; leaving it empty keeps the original folder name (which may show as ungrouped).',
+  ungroupedTag: 'ungrouped',
+  regroupHint: 'Move to',
+  regroupPick: 'Choose a local workspace…',
+  regroupAction: 'Move into that group',
+  regroupDone: 'Sessions moved',
   snapshotTitle: 'Local snapshots',
   snapshotHint: 'Snapshots live only on this machine, for fast rollback; the cloud backup is a separate path.',
   snapshotNow: 'Snapshot now',
@@ -403,6 +415,7 @@ function SettingsSection({ t }) {
   const [outcome, setOutcome] = useState(null)
   const [viewer, setViewer] = useState(null)
   const [expanded, setExpanded] = useState({})
+  const [regroupTarget, setRegroupTarget] = useState({})
   const [verifyResult, setVerifyResult] = useState(null)
   const toastTimer = useRef(null)
 
@@ -517,10 +530,25 @@ function SettingsSection({ t }) {
   })
 
   const openRestore = (instanceId, workspace) => {
+    const key = (workspace && workspace.key) || ''
     setPreview(null)
     setOutcome(null)
-    setRestore({ instanceId, workspace: workspace || '', map: '', overwrite: true })
+    setRestore({
+      instanceId,
+      workspace: key,
+      // Pre-select the local workspace with the same project name, so a
+      // cross-machine restore lands in its group instead of "ungrouped".
+      map: key ? suggestWorkspace(localWorkspaces, workspace) : '',
+      overwrite: true,
+    })
   }
+
+  const regroup = (from, to) => run('regroup', async () => {
+    const result = await post('/sessions/regroup', { from, to })
+    await loadLocalSessions()
+    setRegroupTarget((current) => ({ ...current, [from]: '' }))
+    notify(`${t('regroupDone')}：${result.moved}${result.skipped.length ? ` · ${t('restoreSkipped')} ${result.skipped.length}` : ''}`)
+  })
 
   const doPreview = () => run('preview', async () => {
     const result = await post('/sessions/restore', {
@@ -698,16 +726,39 @@ function SettingsSection({ t }) {
                   onClick: () => setExpanded((current) => ({ ...current, [workspace.key]: !current[workspace.key] })),
                 },
                 h('span', { className: 'dgs-strong' }, workspaceLabel(workspace)),
-                h('span', { className: 'dgs-hint' }, `${workspace.sessionCount} ${t('sessionsCount')} · ${formatBytes(workspace.bytes)}`)),
+                h('span', { className: 'dgs-hint' },
+                  workspace.pathIsExact === false ? `${t('ungroupedTag')} · ` : '',
+                  `${workspace.sessionCount} ${t('sessionsCount')} · ${formatBytes(workspace.bytes)}`)),
                 expanded[workspace.key]
-                  ? h('div', { className: 'dgs-sublist' }, workspace.sessions.map((session) =>
-                    h('div', { key: session.id, className: 'dgs-row dgs-between' },
-                      h('button', {
-                        type: 'button',
-                        className: 'dgs-link',
-                        onClick: () => openViewer(`local=1&workspace=${encodeURIComponent(workspace.key)}&session=${encodeURIComponent(session.id)}&file=${encodeURIComponent(session.file || 'session.jsonl.zstd')}`),
-                      }, session.id),
-                      h('span', { className: 'dgs-hint' }, `${session.files} · ${formatBytes(session.bytes)} · ${formatTime(session.modifiedAt)}`))))
+                  ? h('div', { className: 'dgs-sublist' },
+                    workspace.sessions.map((session) =>
+                      h('div', { key: session.id, className: 'dgs-row dgs-between' },
+                        h('button', {
+                          type: 'button',
+                          className: 'dgs-link',
+                          onClick: () => openViewer(`local=1&workspace=${encodeURIComponent(workspace.key)}&session=${encodeURIComponent(session.id)}&file=${encodeURIComponent(session.file || 'session.jsonl.zstd')}`),
+                        }, session.id),
+                        h('span', { className: 'dgs-hint' }, `${session.files} · ${formatBytes(session.bytes)} · ${formatTime(session.modifiedAt)}`))),
+                    // Sessions are grouped by the workspace their folder maps
+                    // to; when the folder came from another machine nothing
+                    // maps, so dsh shows them ungrouped. Moving the folders is
+                    // what regroups them.
+                    h('div', { className: 'dgs-row dgs-wrap dgs-regroup' },
+                      h('span', { className: 'dgs-hint' }, t('regroupHint')),
+                      h('select', {
+                        className: 'dgs-input dgs-input-sm',
+                        value: regroupTarget[workspace.key] ?? suggestWorkspace(localWorkspaces, workspace),
+                        onChange: (event) => setRegroupTarget((current) => ({ ...current, [workspace.key]: event.target.value })),
+                      },
+                      h('option', { value: '' }, t('regroupPick')),
+                      localWorkspaces.filter((w) => w.key !== workspace.key).map((w) =>
+                        h('option', { key: w.key, value: w.key }, w.path || w.key))),
+                      h(Button, {
+                        variant: 'outline',
+                        size: 'sm',
+                        disabled: busy !== '' || !(regroupTarget[workspace.key] ?? suggestWorkspace(localWorkspaces, workspace)),
+                        onClick: () => regroup(workspace.key, regroupTarget[workspace.key] ?? suggestWorkspace(localWorkspaces, workspace)),
+                      }, t('regroupAction'))))
                   : null))),
 
       h(Card, {
@@ -759,7 +810,7 @@ function SettingsSection({ t }) {
             onChange: (v) => setRestore({ ...restore, overwrite: v }),
           }),
           restore.workspace
-            ? h(Field, { label: t('restoreTarget') },
+            ? h(Field, { label: t('restoreTarget'), hint: t('restoreTargetHint') },
               h('select', {
                 className: 'dgs-input',
                 value: restore.map,
@@ -880,6 +931,33 @@ function visibleSettings(status, draft) {
   return { ...((status && status.settings) || {}), ...edits }
 }
 
+/** Last path segment of a project directory — how the same project is recognised across machines. */
+function workspaceTitle(path) {
+  return String(path || '')
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .pop() || ''
+}
+
+/**
+ * Which local workspace a remote (or restored) one belongs to.
+ *
+ * Two machines rarely keep a project at the same absolute path — `D:\Program
+ * Files\…\data-push` on one, `D:\JetBrains\…\data-push` on the other — and dsh
+ * groups sessions by the workspace their folder maps to, so a session restored
+ * under the *other* machine's folder name shows up as ungrouped. Matching on
+ * the project folder name is what puts it back in its group; the suggestion is
+ * only offered when exactly one local workspace matches.
+ */
+function suggestWorkspace(localWorkspaces, workspace) {
+  const title = workspaceTitle((workspace && workspace.path) || workspace)
+  if (!title) return ''
+  const hits = (localWorkspaces || []).filter(
+    (w) => w && w.key !== (workspace && workspace.key) && workspaceTitle(w.path) === title,
+  )
+  return hits.length === 1 ? hits[0].key : ''
+}
+
 /** Best-effort readable form of a workspace folder key (display only). */
 function decodeWorkspace(key) {
   let s = String(key || '')
@@ -936,6 +1014,8 @@ const STYLE = `
 .dgs-pill-brand { background: var(--dsw-alias-state-business-primary); color: var(--dsw-alias-label-primary-inverted, #fff); }
 .dgs-list-item { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; padding: 12px 14px; background: var(--dsw-alias-bg-layer-1); }
 .dgs-subrow { padding-left: 12px; }
+.dgs-regroup { padding-top: 8px; border-top: 1px dashed var(--dsw-alias-border-l2); }
+.dgs-regroup .dgs-input-sm { max-width: 260px; }
 .dgs-sublist { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px dashed var(--dsw-alias-border-l2); }
 .dgs-disclosure { appearance: none; background: none; border: 0; padding: 0; cursor: pointer; color: inherit; font: inherit; text-align: left; display: flex; flex-direction: column; gap: 2px; }
 .dgs-link { appearance: none; background: none; border: 0; padding: 0; cursor: pointer; color: var(--dsw-alias-state-business-primary); font: inherit; text-align: left; }
@@ -961,7 +1041,7 @@ function SettingsSectionSlot({ __t }) {
 const plugin = {
   name: CLIENT_NAME,
   inject: ['slots', 'locale'],
-  __internals: { NS, ZH, EN, STYLE, STYLE_TAG_ID, ensureStyles, visibleSettings, formatBytes, formatTime, decodeWorkspace },
+  __internals: { NS, ZH, EN, STYLE, STYLE_TAG_ID, ensureStyles, visibleSettings, suggestWorkspace, workspaceTitle, formatBytes, formatTime, decodeWorkspace },
   apply(ctx) {
     let t = (key, vars) => {
       let out = EN[key] || key

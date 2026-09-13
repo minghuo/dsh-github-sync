@@ -234,6 +234,24 @@ export function localSource(dir) {
 
 // ── Restore ──────────────────────────────────────────────────────────────
 
+/** Every zstd frame starts with these four bytes. */
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+
+/**
+ * Would writing this file stop the harness from starting?
+ *
+ * dsh reads every session log's header while building its workspace registry,
+ * and a log it cannot decode is a **fatal** error — `corrupt Zstandard session
+ * log: invalid frame magic` takes the whole profile down, not just that one
+ * session. So a restore refuses anything that is not a zstd frame instead of
+ * landing a file that bricks the next boot.
+ */
+export function isCorruptSessionLog(repoPath, buffer) {
+  if (!/\.jsonl\.zstd$/i.test(String(repoPath))) return false
+  if (!Buffer.isBuffer(buffer) || buffer.length < ZSTD_MAGIC.length) return true
+  return !buffer.subarray(0, ZSTD_MAGIC.length).equals(ZSTD_MAGIC)
+}
+
 /** A workspace folder name must stay a single, harness-shaped path segment. */
 export function sanitizeWorkspaceKey(key) {
   const s = String(key || '')
@@ -292,6 +310,10 @@ export async function restoreFrom({ source, home = dshHome(), only = {}, overwri
 
   for (const { entry, target } of planned) {
     const buffer = await source.read(entry.path)
+    if (isCorruptSessionLog(entry.path, buffer)) {
+      skipped.push({ path: entry.path, reason: '不是合法的 zstd 会话日志；写入它会让 dsh 无法启动，已跳过' })
+      continue
+    }
     const existing = await fsP.readFile(target.abs).catch(() => null)
     if (existing && Buffer.compare(existing, buffer) === 0) {
       unchanged.push(entry.path)

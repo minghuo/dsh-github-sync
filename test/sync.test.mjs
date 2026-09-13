@@ -27,14 +27,17 @@ const INSTANCE = 'laptop-a'
 /** Files this plugin owns — excludes the seed file it writes outside `instances/`. */
 const instanceFiles = (gh) => [...gh.files().keys()].filter((path) => path.startsWith('instances/'))
 
+/** A synthetic but structurally valid zstd frame (magic + payload). */
+const zstd = (...bytes) => Buffer.from([0x28, 0xb5, 0x2f, 0xfd, ...bytes])
+
 /** A throwaway `$DSH_HOME` with sessions, plugin manifests and settings. */
 async function makeHome({ sessions = true, settings = true } = {}) {
   const home = await fsp.mkdtemp(join(tmpdir(), 'dshgs-'))
   if (sessions) {
     await fsp.mkdir(join(home, 'sessions', '--proj-a--', 'session-1'), { recursive: true })
     await fsp.mkdir(join(home, 'sessions', '--proj-a--', 'session-2'), { recursive: true })
-    await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd'), Buffer.from([1, 2, 3, 4]))
-    await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session-2', 'session.jsonl.zstd'), Buffer.from([9, 9]))
+    await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd'), zstd(1, 2, 3, 4))
+    await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session-2', 'session.jsonl.zstd'), zstd(9, 9))
     await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session_projcache.json'), '{}')
   }
   await fsp.mkdir(join(home, 'profiles', 'web', 'node_modules'), { recursive: true })
@@ -75,7 +78,7 @@ test('buildPlan honours group toggles and the per-file size ceiling', async () =
   const withSettings = await buildPlan({ home, instanceId: INSTANCE, groups: { sessions: false, plugins: false, settings: true } })
   assert.deepEqual(withSettings.files.map((f) => f.repoPath), [`instances/${INSTANCE}/settings/settings.yaml`])
 
-  await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session-2', 'session.jsonl.zstd'), Buffer.alloc(1_500_000, 1))
+  await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session-2', 'session.jsonl.zstd'), Buffer.concat([zstd(), Buffer.alloc(1_500_000, 1)]))
   const capped = await buildPlan({ home, instanceId: INSTANCE, groups: { sessions: true, plugins: true, settings: false }, maxFileMb: 1 })
   assert.equal(capped.skipped.length, 1, 'oversized files are reported, not silently dropped')
   assert.match(capped.skipped[0].reason, /超过单文件上限/)
@@ -132,7 +135,7 @@ test('pushSnapshot uploads only what changed and prunes deleted sessions', async
   const blobsAfterFirst = gh.calls.filter((c) => c[0] === 'createBlob').length
 
   // one session changes, one is deleted
-  await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd'), Buffer.from([7, 7, 7, 7, 7]))
+  await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd'), zstd(7, 7, 7, 7, 7))
   await fsp.rm(join(home, 'sessions', '--proj-a--', 'session-2'), { recursive: true })
 
   const report = await pushSnapshot({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE, plan: await planFor(home) })
@@ -199,7 +202,7 @@ test('restoreFrom pulls a remote backup into a fresh installation', async () => 
 
   assert.equal(result.written.length, 2)
   const restored = await fsp.readFile(join(target, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd'))
-  assert.deepEqual([...restored], [1, 2, 3, 4])
+  assert.deepEqual([...restored], [...zstd(1, 2, 3, 4)])
   await assert.rejects(fsp.access(join(target, 'profiles', 'web', 'package.json')), 'plugins group was not requested')
 })
 
@@ -228,17 +231,46 @@ test('restoreFrom never overwrites a modified local file unless asked', async ()
   const source = remoteSource({ client: gh, owner: 'acme', repo: 'dsh-backup', treeMap: tree.tree })
 
   const local = join(home, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd')
-  await fsp.writeFile(local, Buffer.from([5, 5, 5, 5, 5]))
+  await fsp.writeFile(local, zstd(5, 5, 5, 5, 5))
   const guarded = await restoreFrom({ source, home, only: { groups: ['sessions'] }, overwrite: false })
   assert.equal(guarded.written.length, 0, 'the locally modified session is left alone')
   assert.equal(guarded.skipped.length, 1)
   assert.match(guarded.skipped[0].reason, /未允许覆盖/)
   assert.equal(guarded.unchanged.length, 1)
-  assert.deepEqual([...await fsp.readFile(local)], [5, 5, 5, 5, 5])
+  assert.deepEqual([...await fsp.readFile(local)], [...zstd(5, 5, 5, 5, 5)])
 
   const forced = await restoreFrom({ source, home, only: { groups: ['sessions'] }, overwrite: true })
-  assert.deepEqual([...await fsp.readFile(local)], [1, 2, 3, 4])
+  assert.deepEqual([...await fsp.readFile(local)], [...zstd(1, 2, 3, 4)])
   assert.equal(forced.written[0].replaced, true)
+})
+
+test('a restore refuses a session log that is not a zstd frame', async () => {
+  // dsh reads every session log's header while building its workspace registry
+  // and treats an undecodable one as fatal, so writing this file would stop the
+  // harness from starting at all — not merely break one session.
+  const custom = await fsp.mkdtemp(join(tmpdir(), 'dshgs-corrupt-'))
+  const source = {
+    kind: 'test',
+    async list() {
+      return [
+        { path: 'instances/x/sessions/--p--/s1/session.jsonl.zstd', size: 17 },
+        { path: 'instances/x/sessions/--p--/s2/session.v3.jsonl.zstd', size: 4 },
+        { path: 'instances/x/sessions/--p--/s1/notes.txt', size: 5 },
+      ]
+    },
+    async read(path) {
+      if (path.endsWith('notes.txt')) return Buffer.from('hello')
+      if (path.includes('/s2/')) return zstd()
+      return Buffer.from('not zstd at all')
+    },
+  }
+
+  const result = await restoreFrom({ source, home: custom, only: { groups: ['sessions'] } })
+  assert.equal(result.written.length, 2, 'the valid frame and the plain file are written')
+  assert.equal(result.skipped.length, 1)
+  assert.match(result.skipped[0].reason, /不是合法的 zstd 会话日志/)
+  await assert.rejects(fsp.access(join(custom, 'sessions', '--p--', 's1', 'session.jsonl.zstd')))
+  assert.deepEqual([...await fsp.readFile(join(custom, 'sessions', '--p--', 's2', 'session.v3.jsonl.zstd'))], [...zstd()])
 })
 
 // ── Local snapshots ─────────────────────────────────────────────────────

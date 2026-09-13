@@ -126,11 +126,14 @@ function githubFetchServer(fake) {
   }
 }
 
+/** A synthetic but structurally valid zstd frame (magic + payload). */
+const zstd = (...bytes) => Buffer.from([0x28, 0xb5, 0x2f, 0xfd, ...bytes])
+
 /** A throwaway `$DSH_HOME` with sessions and two profiles. */
 async function makeHome() {
   const dir = await fsp.mkdtemp(join(tmpdir(), 'dshgs-plugin-'))
   await fsp.mkdir(join(dir, 'sessions', '--proj-a--', 'session-1'), { recursive: true })
-  await fsp.writeFile(join(dir, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd'), Buffer.from([1, 2, 3, 4, 5]))
+  await fsp.writeFile(join(dir, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd'), zstd(1, 2, 3, 4, 5))
   await fsp.mkdir(join(dir, 'profiles', 'web'), { recursive: true })
   await fsp.writeFile(join(dir, 'profiles', 'web', 'package.json'), '{"name":"dsh-profile-web"}')
   await fsp.writeFile(join(dir, 'settings.yaml'), 'ui-theme:\n  preference: dark\n')
@@ -334,7 +337,7 @@ test('sessions from another machine can be previewed and restored', async () => 
 
   // Pretend a second machine pushed its own sessions.
   const seed = await import('../src/sync.js')
-  const plan = { files: [{ repoPath: `instances/${other}/sessions/--proj-z--/session-9/session.jsonl.zstd`, content: Buffer.from('remote-bytes'), size: 12 }], totals: { sessions: 1, plugins: 0, settings: 0 } }
+  const plan = { files: [{ repoPath: `instances/${other}/sessions/--proj-z--/session-9/session.jsonl.zstd`, content: zstd(0x72, 0x65, 0x6d), size: 7 }], totals: { sessions: 1, plugins: 0, settings: 0 } }
   await seed.pushSnapshot({
     client: {
       getBranchHead: (...a) => gh.getBranchHead(...a),
@@ -359,8 +362,8 @@ test('sessions from another machine can be previewed and restored', async () => 
   assert.equal(restored.body.written.length, 1)
   assert.match(restored.body.safetySnapshot, /^pre-restore-/)
 
-  const written = await fsp.readFile(join(home, 'sessions', '--proj-z--', 'session-9', 'session.jsonl.zstd'), 'utf8')
-  assert.equal(written, 'remote-bytes')
+  const written = await fsp.readFile(join(home, 'sessions', '--proj-z--', 'session-9', 'session.jsonl.zstd'))
+  assert.deepEqual([...written], [...zstd(0x72, 0x65, 0x6d)])
 })
 
 test('restoring this machine onto itself needs an explicit force', async () => {
@@ -380,7 +383,7 @@ test('a workspace can be remapped while restoring', async () => {
   assert.equal(result.status, 200)
   assert.equal(result.body.written.length, 1)
   const remapped = await fsp.readFile(join(home, 'sessions', '--remapped--', 'session-1', 'session.v3.jsonl.zstd'))
-  assert.deepEqual([...remapped], [1, 2, 3, 4, 5])
+  assert.deepEqual([...remapped], [...zstd(1, 2, 3, 4, 5)])
 
   const bad = await callRoute('POST', '/dsh-github-sync/api/sessions/restore', {
     instanceId,
@@ -401,12 +404,12 @@ test('snapshots can be taken, listed, restored and deleted', async () => {
 
   // Change a session after the snapshot, then roll it back.
   const sessionFile = join(home, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd')
-  await fsp.writeFile(sessionFile, Buffer.from([9, 9, 9, 9, 9]))
+  await fsp.writeFile(sessionFile, zstd(9, 9, 9, 9, 9))
   const restored = await callRoute('POST', '/dsh-github-sync/api/snapshots/restore', { name: 'unit-test', groups: ['sessions'] })
   assert.equal(restored.status, 200)
   assert.equal(restored.body.written.length, 1)
   assert.match(restored.body.safetySnapshot, /^pre-restore-/)
-  assert.deepEqual([...await fsp.readFile(sessionFile)], [1, 2, 3, 4, 5])
+  assert.deepEqual([...await fsp.readFile(sessionFile)], [...zstd(1, 2, 3, 4, 5)])
 
   const deleted = await callRoute('POST', '/dsh-github-sync/api/snapshots/delete', { name: 'unit-test' })
   assert.equal(deleted.status, 200)

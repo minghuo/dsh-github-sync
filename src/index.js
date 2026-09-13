@@ -312,6 +312,21 @@ function safeLocalSessionPath(home, workspace, session, file) {
 }
 
 /**
+ * The last path segment of a project directory.
+ *
+ * Two machines rarely keep the same project at the same absolute path, so the
+ * folder name is what identifies "the same project" across them — and what a
+ * restored session is matched on when deciding which local workspace should
+ * own it.
+ */
+function workspaceTitle(path) {
+  return String(path || '')
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .pop() || ''
+}
+
+/**
  * Turn a transport error into something a user can act on.
  *
  * The one that matters is 404. GitHub answers 404 — not 403 — for a repository
@@ -878,6 +893,89 @@ export function apply(ctx, config = {}) {
                 workspaceMap: map,
               })
               sendJson(res, 200, { ...result, safetySnapshot: safety })
+              return
+            }
+
+            // GET /sessions/grouping — which session folders have no matching
+            // local workspace, and which local workspace each one most likely
+            // belongs to (matched by project folder name).
+            if (method === 'GET' && route === `${API_PREFIX}/sessions/grouping`) {
+              const inventory = await localSessionInventory(home)
+              const known = inventory.workspaces.filter((w) => w.pathIsExact)
+              const groups = inventory.workspaces.map((w) => {
+                const title = workspaceTitle(w.path)
+                const candidates = known.filter((k) => k.key !== w.key && workspaceTitle(k.path) === title)
+                return {
+                  key: w.key,
+                  path: w.path,
+                  title,
+                  sessions: w.sessionCount,
+                  bytes: w.bytes,
+                  grouped: w.pathIsExact,
+                  suggest: candidates.length === 1 ? candidates[0].key : '',
+                  suggestPath: candidates.length === 1 ? candidates[0].path : '',
+                }
+              })
+              sendJson(res, 200, { workspaces: groups, local: known.map((w) => ({ key: w.key, path: w.path, title: workspaceTitle(w.path) })) })
+              return
+            }
+
+            // POST /sessions/regroup { from, to, dryRun? } — move whole session
+            // folders into another workspace folder, which is what changes the
+            // group dsh shows them under.
+            if (method === 'POST' && route === `${API_PREFIX}/sessions/regroup`) {
+              const body = await readJsonBody(req)
+              const from = sanitizeWorkspaceKey(body.from)
+              const to = sanitizeWorkspaceKey(body.to)
+              if (!from || !to) {
+                sendJson(res, 400, { error: '工作区目录名不合法' })
+                return
+              }
+              if (from === to) {
+                sendJson(res, 400, { error: '源与目标是同一个工作区' })
+                return
+              }
+              const fromDir = join(home, 'sessions', from)
+              const toDir = join(home, 'sessions', to)
+              const entries = await fsP.readdir(fromDir, { withFileTypes: true }).catch(() => null)
+              if (!entries) {
+                sendJson(res, 404, { error: `源工作区目录不存在：${displayPath(fromDir)}` })
+                return
+              }
+              const sessions = entries.filter((e) => e.isDirectory())
+              if (body.dryRun === true) {
+                sendJson(res, 200, { dryRun: true, sessions: sessions.length, from: displayPath(fromDir), to: displayPath(toDir) })
+                return
+              }
+
+              await fsP.mkdir(toDir, { recursive: true })
+              const moved = []
+              const skipped = []
+              for (const entry of sessions) {
+                const source = join(fromDir, entry.name)
+                const target = join(toDir, entry.name)
+                const clash = await fsP.access(target).then(() => true).catch(() => false)
+                if (clash) {
+                  skipped.push({ session: entry.name, reason: '目标工作区已有同名会话' })
+                  continue
+                }
+                try {
+                  await fsP.rename(source, target)
+                  moved.push(entry.name)
+                } catch (error) {
+                  skipped.push({ session: entry.name, reason: String((error && error.message) || error) })
+                }
+              }
+              // The source folder is what dsh renders as its own group, so an
+              // emptied one is removed rather than left as an empty group.
+              const remaining = await fsP.readdir(fromDir).catch(() => ['?'])
+              let removedSource = false
+              if (remaining.length === 0) {
+                await fsP.rm(fromDir, { recursive: true, force: true }).catch(() => {})
+                removedSource = true
+              }
+              log.info(`会话归组：${displayPath(fromDir)} → ${displayPath(toDir)}，移动 ${moved.length}，跳过 ${skipped.length}`)
+              sendJson(res, 200, { from: displayPath(fromDir), to: displayPath(toDir), moved: moved.length, skipped, removedSource })
               return
             }
 

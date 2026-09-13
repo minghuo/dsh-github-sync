@@ -96,6 +96,28 @@ function loadClientBundle() {
   return { registrations, plugin, ctx, slots, locales, effects, document }
 }
 
+test('a restored session is matched to the local workspace with the same project name', () => {
+  const { plugin } = loadClientBundle()
+  const { suggestWorkspace, workspaceTitle } = plugin.__internals
+
+  const local = [
+    { key: '--D-JetBrains-git-workspace-data-push--', path: 'D:\\JetBrains\\git-workspace\\data-push' },
+    { key: '--D-JetBrains-git-workspace-sentinel-eyes--', path: 'D:\\JetBrains\\git-workspace\\sentinel-eyes' },
+  ]
+
+  // The other machine keeps the same project at a different absolute path.
+  const remote = { key: '--D-Program~0020Files-JetBrains-git-workspace-data-push--', path: 'D:\\Program Files\\JetBrains\\git-workspace\\data-push' }
+  assert.equal(workspaceTitle(remote.path), 'data-push')
+  assert.equal(suggestWorkspace(local, remote), local[0].key)
+
+  // A workspace already local is never remapped onto itself.
+  assert.equal(suggestWorkspace(local, local[0]), '')
+
+  // Ambiguity and unknown names suggest nothing rather than guessing.
+  assert.equal(suggestWorkspace([...local, { key: '--x-data-push--', path: 'X:\\other\\data-push' }], remote), '')
+  assert.equal(suggestWorkspace(local, { key: '--a--', path: 'D:\\nowhere\\unknown-project' }), '')
+})
+
 test('a saved token is never shown as unconfigured because of a stale draft', () => {
   const { plugin } = loadClientBundle()
   const { visibleSettings } = plugin.__internals
