@@ -1,0 +1,8 @@
+# Keep the whole package LF on every platform: the client bundle is generated
+# byte-for-byte by scripts/build-client.mjs, and a CRLF checkout would make the
+# committed artifact differ from a freshly built one.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.zstd binary
