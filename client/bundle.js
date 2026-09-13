@@ -70,6 +70,8 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-github-sync'
     const CLIENT_NAME = 'dsh-github-sync'
     const API = '/dsh-github-sync/api'
+    /** Lowest host-half API this bundle can drive. */
+    const REQUIRED_API = 2
     /** Identity of the injected stylesheet, in the shell's `data-plugin-css` form. */
     const STYLE_TAG_ID = `${CLIENT_NAME}/client.css`
 
@@ -193,6 +195,8 @@ window.__ModuleLoader__.load({
       pluginsMissingNone: '没有缺失的插件——本机与云端的插件清单一致。',
       copy: '复制',
       copyCommand: '已复制命令',
+      hostOutdated: '宿主半边是旧版本（v{version}，接口 {api}）：插件清单、与云端比较、进度显示需要重启 dsh web 才会出现——宿主代码只在进程启动时加载，刷新页面不会更新它。',
+      hostApiNone: '无',
       snapshotTitle: '本地快照',
       snapshotHint: '快照只存在本机，用于快速回滚；云端备份是另一条独立链路。',
       snapshotNow: '立即快照',
@@ -335,6 +339,8 @@ window.__ModuleLoader__.load({
       pluginsMissingNone: 'Nothing missing — this machine and the cloud declare the same plugins.',
       copy: 'Copy',
       copyCommand: 'Command copied',
+      hostOutdated: 'The host half is an older build (v{version}, api {api}): the plugin inventory, cloud comparison and progress display need a dsh web restart — host code only loads when the process starts, refreshing the page does not update it.',
+      hostApiNone: 'none',
       snapshotTitle: 'Local snapshots',
       snapshotHint: 'Snapshots live only on this machine, for fast rollback; the cloud backup is a separate path.',
       snapshotNow: 'Snapshot now',
@@ -492,6 +498,17 @@ window.__ModuleLoader__.load({
       const [verifyResult, setVerifyResult] = useState(null)
       const toastTimer = useRef(null)
 
+      /**
+       * Is the host half new enough for the routes this bundle calls?
+       *
+       * The bundle is re-read from disk on every page load, while the host half
+       * only changes when the dsh process restarts — so a refreshed page is
+       * routinely newer than the process behind it. Without this check the new
+       * surfaces answer `未知接口` and look broken. Declared before the first hook
+       * that depends on it, because a dependency array is evaluated during render.
+       */
+      const hostIsCurrent = hostSupportsApi(status)
+
       const notify = (message) => {
         setToast(message)
         if (toastTimer.current) clearTimeout(toastTimer.current)
@@ -580,8 +597,8 @@ window.__ModuleLoader__.load({
           if (!remote) loadRemote()
         }
         if (tab === 'snapshots' && snapshots.length === 0) loadSnapshots()
-        if (tab === 'plugins' && !plugins) loadPlugins()
-      }, [tab])
+        if (tab === 'plugins' && !plugins && hostIsCurrent) loadPlugins()
+      }, [tab, hostIsCurrent])
 
       const makeSnapshot = () => run('snapshot', async () => {
         const result = await post('/snapshots', { name: snapshotName })
@@ -623,7 +640,7 @@ window.__ModuleLoader__.load({
        * doing instead of showing an opaque spinner.
        */
       useEffect(() => {
-        if (busy === '') {
+        if (busy === '' || !hostIsCurrent) {
           setProgress(null)
           return undefined
         }
@@ -726,8 +743,15 @@ window.__ModuleLoader__.load({
             h('p', { className: 'dgs-hint' }, t('subtitle'))),
           h('div', { className: 'dgs-row' },
             h(Button, { variant: 'outline', size: 'sm', onClick: verify, disabled: !configured || busy !== '' }, busy === 'verify' ? t('verifying') : t('verify')),
-            h(Button, { variant: 'outline', size: 'sm', onClick: loadCompare, disabled: !configured || busy !== '' }, t('compare')),
+            h(Button, { variant: 'outline', size: 'sm', onClick: loadCompare, disabled: !configured || busy !== '' || !hostIsCurrent }, t('compare')),
             h(Button, { variant: 'primary', size: 'sm', onClick: syncNow, disabled: !configured || busy !== '' }, busy === 'sync' ? t('syncing') : t('syncNow')))),
+
+        // A newer page in front of an older process: say so instead of letting
+        // every new surface answer 未知接口.
+        status && !hostIsCurrent
+          ? h('div', { className: 'dgs-warn dgs-note' },
+            t('hostOutdated', { version: status.version || '?', api: status.api === undefined ? t('hostApiNone') : status.api }))
+          : null,
 
         // Live progress for whatever long operation is running.
         progress && progress.op
@@ -743,7 +767,8 @@ window.__ModuleLoader__.load({
           : null,
 
         h('nav', { className: 'dgs-tabs' },
-          ['overview', 'sessions', 'plugins', 'snapshots', 'advanced'].map((key) =>
+          // The plugin inventory needs a route the older host half does not have.
+          ['overview', 'sessions', ...(hostIsCurrent ? ['plugins'] : []), 'snapshots', 'advanced'].map((key) =>
             h('button', {
               key,
               type: 'button',
@@ -1150,6 +1175,18 @@ window.__ModuleLoader__.load({
       return { ...((status && status.settings) || {}), ...edits }
     }
 
+    /**
+     * Whether the host half serving this page speaks the API this bundle calls.
+     *
+     * A host that predates the version field reads as 0 — deliberately, because
+     * "no answer" and "an old answer" need the same treatment: the page was
+     * refreshed after an update but the process was not restarted.
+     */
+    function hostSupportsApi(status, required = REQUIRED_API) {
+      const api = status && typeof status.api === 'number' ? status.api : 0
+      return api >= required
+    }
+
     /** Copy helper: the shell's clipboard writer when present, the DOM API otherwise. */
     function writeClipboard(text) {
       try {
@@ -1281,7 +1318,7 @@ window.__ModuleLoader__.load({
     const plugin = {
       name: CLIENT_NAME,
       inject: ['slots', 'locale'],
-      __internals: { NS, ZH, EN, STYLE, STYLE_TAG_ID, ensureStyles, visibleSettings, suggestWorkspace, workspaceTitle, formatBytes, formatTime, decodeWorkspace },
+      __internals: { NS, ZH, EN, STYLE, STYLE_TAG_ID, ensureStyles, visibleSettings, hostSupportsApi, suggestWorkspace, workspaceTitle, formatBytes, formatTime, decodeWorkspace },
       apply(ctx) {
         let t = (key, vars) => {
           let out = EN[key] || key

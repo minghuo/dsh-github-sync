@@ -61,6 +61,26 @@ import {
 const NAME = 'dsh-github-sync'
 const SETTINGS_NS = 'dsh-github-sync'
 const API_PREFIX = `/${NAME}/api`
+
+/**
+ * HTTP surface version, bumped whenever a route is added.
+ *
+ * The two halves update on different schedules: the browser loads a fresh
+ * client bundle on every page load, while the host half only changes when the
+ * dsh process restarts. So a page can easily be newer than the process serving
+ * it, and the only way for the client to notice is for the host to say what it
+ * speaks.
+ */
+const API_VERSION = 2
+
+/** This package's own version, for the "your host half is old" message. */
+function ownVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+  } catch {
+    return undefined
+  }
+}
 const MAX_BODY_BYTES = 256 * 1024
 const MAX_TEXT_BYTES = 512 * 1024
 const HISTORY_LIMIT = 20
@@ -891,6 +911,8 @@ export function apply(ctx, config = {}) {
                 },
                 snapshots: { count: snapshots.length, latest: snapshots[0] ? snapshots[0].name : null, bytes: snapshots.reduce((n, s) => n + s.bytes, 0) },
                 capabilities: { zstd: zstdAvailable(), settingsService: Boolean(settingsScope()) },
+                api: API_VERSION,
+                version: ownVersion(),
               })
               return
             }
@@ -1350,7 +1372,11 @@ export function apply(ctx, config = {}) {
               return
             }
 
-            sendJson(res, 404, { error: `未知接口 ${method} ${route}` })
+            sendJson(res, 404, {
+              error: `未知接口 ${method} ${route}`,
+              api: API_VERSION,
+              hint: '如果刚更新过插件：宿主半边的代码只在 dsh 进程启动时加载，重启 dsh web 后新接口才存在。',
+            })
           } catch (error) {
             const message = explainError(error)
             log.warn(`${method} ${route} 失败：${message}`)

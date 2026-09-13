@@ -96,6 +96,20 @@ function loadClientBundle() {
   return { registrations, plugin, ctx, slots, locales, effects, document }
 }
 
+test('an older host half is detected so new surfaces never answer 未知接口', () => {
+  const { plugin } = loadClientBundle()
+  const { hostSupportsApi } = plugin.__internals
+
+  // A host from before the version field existed — the shape that produced
+  // "未知接口 GET /dsh-github-sync/api/plugins" after a page refresh.
+  assert.equal(hostSupportsApi({ configured: true }), false)
+  assert.equal(hostSupportsApi(null), false)
+  assert.equal(hostSupportsApi({ api: 1 }), false)
+  assert.equal(hostSupportsApi({ api: 2 }), true)
+  assert.equal(hostSupportsApi({ api: 3 }), true)
+  assert.equal(hostSupportsApi({ api: '2' }), false, 'a string is not a version this bundle trusts')
+})
+
 test('a restored session is matched to the local workspace with the same project name', () => {
   const { plugin } = loadClientBundle()
   const { suggestWorkspace, workspaceTitle } = plugin.__internals
