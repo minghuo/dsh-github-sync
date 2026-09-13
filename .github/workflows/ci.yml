@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: 客户端 bundle 与源码一致
+        run: |
+          node scripts/build-client.mjs
+          git diff --exit-code -- client/bundle.js
+      - name: 语法检查
+        run: npm run check
+      - name: 测试
+        run: npm test

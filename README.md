@@ -95,6 +95,41 @@ dsh plugin --profile web add "file:D:\path\to\dsh-github-sync"
 | GET | `/snapshots` | 本地快照列表 |
 | POST | `/snapshots` · `/snapshots/restore` · `/snapshots/delete` | 新建 / 恢复 / 删除快照 |
 
+## 发布
+
+三件事互相独立：**代码托管**（GitHub 仓库）、**可安装**（git spec 或 npm 包）、**上架**（插件市场条目）。
+
+### 1. 推到 GitHub
+
+```bash
+# 需要 fine-grained PAT：Contents: write（首次建仓库再加 Administration: write）
+GITHUB_TOKEN=github_pat_xxx node scripts/publish-github.mjs repo --owner <你的账号>
+```
+
+脚本走 GitHub REST（不需要 git 远端，也不读凭据管理器），会建仓库、推送工作树、写入 `dsh-plugin` 等 topics。`--dry-run` 只打印计划；`status` 汇报现状与上架条件。环境里 git 可用时，普通 `git push` 也一样：
+
+```bash
+git remote add origin https://github.com/<你的账号>/dsh-github-sync.git
+git push -u origin main
+```
+
+### 2. 让它可安装
+
+两条路，**不必都做**：
+
+- **git spec**（零发布成本）：`dsh plugin --profile web add github:<账号>/dsh-github-sync`
+- **npm**：`npm version patch && git push --follow-tags`，`.github/workflows/publish.yml` 会在 `v*` tag 上发布（需要仓库 secret `NPM_TOKEN`），之后 `dsh plugin --profile web add dsh-github-sync` 即可。
+
+### 3. 上架到插件市场
+
+市场目录来自 [`awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)：一个插件一个文件 `data/plugins/<owner>__<repo>.yml`。本仓库的条目在 `docs/registry-entry.yml`：
+
+```bash
+node scripts/publish-github.mjs registry   # fork → 分支 → 条目 → PR
+```
+
+CI 会检查「仓库创建满 1 天」，所以**仓库刚建的当天提交会被自动拒绝**——脚本会算好还差几小时并拒绝执行，避免白发一个 PR。另外要求仓库带 `dsh-plugin` topic、`package.json` 声明 `dsh.bundle`（本仓库已有）。
+
 ## 开发
 
 ```bash
@@ -102,6 +137,8 @@ npm test              # node:test，含一个把 GitHub 换成内存实现的端
 npm run build:client  # 由 client/index.js 生成 client/bundle.js
 npm run check         # 两个入口的语法检查
 ```
+
+`client/bundle.js` 是提交进仓库的构建产物（git 安装不会跑构建），CI 会重新构建并断言它与 `client/index.js` 一致。
 
 - 宿主半边是 **ESM**：`export { name, inject, apply }`，`apply(ctx, config)` 里用 `ctx.effect` 包住 `ctx.webServer.register`。
 - 客户端半边由 `scripts/build-client.mjs` 包成 `window.__ModuleLoader__.load({ id, factory })`，**id 必须等于包名**，`exports["./client"]` 指向构建产物。

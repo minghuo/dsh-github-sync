@@ -1,0 +1,52 @@
+# Publishes the package to npm when a `v*` tag is pushed, which is what makes
+# `dsh plugin --profile web add dsh-github-sync` (the install line the plugin
+# market shows for an npm-backed entry) resolve.
+#
+# Requires an NPM_TOKEN repository secret — an npm automation token with
+# publish rights for this package. Without it, installation by git spec still
+# works: `dsh plugin --profile web add github:<owner>/dsh-github-sync`.
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "tag $tag != package.json $pkg" >&2
+            exit 1
+          fi
+
+      - name: 构建并测试
+        run: |
+          node scripts/build-client.mjs
+          git diff --exit-code -- client/bundle.js
+          npm run check
+          npm test
+
+      - name: 发布
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes
