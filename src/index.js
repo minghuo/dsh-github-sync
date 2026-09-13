@@ -814,8 +814,11 @@ export function apply(ctx, config = {}) {
       own: ownDiff.profiles,
       suggestions,
       // install + update, computed here so a client can never ask for an
-      // arbitrary command to be run.
+      // arbitrary command to be run. `blocked` holds the profiles the CLI
+      // refuses to manage (desktop), which are shown with a reason instead of
+      // an action that would always fail.
       actions: planPluginActions(local, others).actions,
+      blocked: planPluginActions(local, others).blocked,
       instances: inventory.instances.map((i) => i.instanceId),
       // Per-machine detail for the cloud list: which profiles it declares and
       // when it last synced, so a user can tell whose version they are reading.
@@ -1040,7 +1043,13 @@ export function apply(ctx, config = {}) {
                 return
               }
               if (targets.length === 0) {
-                sendJson(res, 200, { applied: [], note: '没有需要安装或更新的插件' })
+                sendJson(res, 200, {
+                  applied: [],
+                  blocked: report.blocked || [],
+                  note: (report.blocked || []).length
+                    ? '没有可执行的安装；有插件属于命令行无法管理的 profile（见下方说明）'
+                    : '没有需要安装或更新的插件',
+                })
                 return
               }
 
@@ -1060,6 +1069,7 @@ export function apply(ctx, config = {}) {
               }
               sendJson(res, 200, {
                 applied,
+                blocked: report.blocked || [],
                 restartRequired: applied.some((a) => a.ok),
                 note: applied.some((a) => a.ok) ? '安装/更新完成：重启 dsh web 后新插件才会挂载。' : undefined,
               })

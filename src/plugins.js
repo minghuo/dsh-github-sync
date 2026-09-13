@@ -162,6 +162,23 @@ export function compareVersions(a, b) {
 const SAFE_NAME = /^[@a-zA-Z0-9][\w@/.-]*$/
 
 /**
+ * Can `dsh plugin --profile <p>` manage this profile at all?
+ *
+ * The launcher refuses `desktop` outright — `rejectElectronProfile()` in
+ * bin.js answers `profile "desktop" is managed exclusively by the Electron
+ * application` — so an install there can never succeed and must not be offered
+ * as a one-click action.
+ */
+export function isCliManageableProfile(profile) {
+  return String(profile || '').toLowerCase() !== 'desktop'
+}
+
+/** Why a profile's plugins cannot be installed from here. */
+export function blockedReason(profile) {
+  return `profile「${profile}」由桌面（Electron）应用独占管理，命令行无法安装；请在桌面应用内添加。`
+}
+
+/**
  * The single argument `add` receives.
  *
  * A version range becomes `name@version`; a git, url or path specification is
@@ -190,10 +207,16 @@ export function packageSpecArg({ name, spec } = {}) {
  */
 export function planPluginActions(local, cloud = {}) {
   const actions = []
+  const blocked = []
+  const place = (row, entry) => {
+    if (isCliManageableProfile(row.profile)) actions.push(entry)
+    else blocked.push({ ...entry, reason: blockedReason(row.profile) })
+  }
+
   for (const row of diffProfilePlugins(local, cloud).profiles) {
     for (const pkg of row.added) {
       if (!SAFE_NAME.test(pkg.name)) continue
-      actions.push({
+      place(row, {
         profile: row.profile,
         name: pkg.name,
         kind: 'install',
@@ -208,7 +231,7 @@ export function planPluginActions(local, cloud = {}) {
       const target = versionFromSpec(pkg.cloudSpec)
       if (!target || !pkg.installedVersion) continue
       if (compareVersions(target, pkg.installedVersion) <= 0) continue
-      actions.push({
+      place(row, {
         profile: row.profile,
         name: pkg.name,
         kind: 'update',
@@ -220,5 +243,7 @@ export function planPluginActions(local, cloud = {}) {
       })
     }
   }
-  return { actions: actions.sort((a, b) => `${a.profile}/${a.name}`.localeCompare(`${b.profile}/${b.name}`)) }
+
+  const byName = (a, b) => `${a.profile}/${a.name}`.localeCompare(`${b.profile}/${b.name}`)
+  return { actions: actions.sort(byName), blocked: blocked.sort(byName) }
 }

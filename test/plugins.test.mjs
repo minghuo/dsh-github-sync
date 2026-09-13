@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import * as pluginInternals from '../src/plugins.js'
-import { compareVersions, diffProfilePlugins, installCommand, planPluginActions, readAllProfiles, readProfilePlugins } from '../src/plugins.js'
+import { compareVersions, diffProfilePlugins, installCommand, isCliManageableProfile, planPluginActions, readAllProfiles, readProfilePlugins } from '../src/plugins.js'
 
 /** A profile directory with a manifest and (optionally) installed packages. */
 async function makeProfile(home, profile, { dependencies = {}, bundles = [], installed = {} } = {}) {
@@ -122,6 +122,25 @@ test('planPluginActions installs what is missing and updates only what is older'
   assert.equal(update.from, '1.0.0')
   assert.equal(update.command, 'dsh plugin --profile web add older@2.0.0')
   assert.equal(update.arg, 'older@2.0.0')
+})
+
+test('planPluginActions never offers an install the CLI would refuse', () => {
+  // `dsh plugin --profile desktop add …` answers "profile desktop is managed
+  // exclusively by the Electron application", so it must not become a button.
+  const local = [{ profile: 'desktop', packages: [] }, { profile: 'web', packages: [] }]
+  const cloud = {
+    desktop: { packages: [{ name: '@deepseek-ai/dsh-toolkit', spec: '^0.0.1' }] },
+    web: { packages: [{ name: 'dsh-browser', spec: '^0.1.0' }] },
+  }
+
+  const { actions, blocked } = planPluginActions(local, cloud)
+  assert.deepEqual(actions.map((a) => `${a.profile}/${a.name}`), ['web/dsh-browser'])
+  assert.deepEqual(blocked.map((b) => `${b.profile}/${b.name}`), ['desktop/@deepseek-ai/dsh-toolkit'])
+  assert.match(blocked[0].reason, /独占管理/)
+  assert.equal(isCliManageableProfile('desktop'), false)
+  assert.equal(isCliManageableProfile('Desktop'), false, 'the launcher compares case-insensitively')
+  assert.equal(isCliManageableProfile('web'), true)
+  assert.equal(isCliManageableProfile('dsh-tui'), true)
 })
 
 test('packageSpecArg keeps a git source instead of inventing a version', () => {

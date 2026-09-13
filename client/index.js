@@ -198,6 +198,8 @@ const ZH = {
   restartReload: '如果刷新后仍无响应，请在终端确认 dsh web 是否已重新启动',
   restartCardTitle: '重启 dsh',
   restartCardHint: '插件安装/更新、切换 profile 之后都需要重启进程才会生效。重启后刷新本页即可，登录状态会保留。',
+  pluginsBlockedTitle: '命令行无法安装的插件',
+  pluginsBlockedHint: '这些插件属于由桌面（Electron）应用独占管理的 profile，dsh CLI 会直接拒绝（error: profile "desktop" is managed exclusively by the Electron application）。它们仍会被备份，但只能在桌面应用内添加。',
   cloudPluginsTitle: '云端插件列表',
   cloudPluginsHint: '各机器备份里声明的插件，以及那台机器最后一次同步到云端的时间。',
   cloudPluginsEmpty: '云端还没有任何插件清单。',
@@ -363,6 +365,8 @@ const EN = {
   restartReload: 'if the page still does not respond, check the terminal that dsh web restarted',
   restartCardTitle: 'Restart dsh',
   restartCardHint: 'Installing or updating a plugin only takes effect when the process restarts. Your login survives the restart.',
+  pluginsBlockedTitle: 'Cannot be installed from the CLI',
+  pluginsBlockedHint: 'These belong to a profile the desktop (Electron) app manages exclusively — the dsh CLI refuses it outright. They are still backed up, but can only be added inside the desktop app.',
   cloudPluginsTitle: 'Plugins in the cloud',
   cloudPluginsHint: 'Plugins declared in each machine\'s backup, and when that machine last synced.',
   cloudPluginsEmpty: 'No plugin manifests in the cloud yet.',
@@ -1206,6 +1210,18 @@ function SettingsSection({ t }) {
             ? h('div', { className: 'dgs-row' },
               h(Button, { variant: 'primary', size: 'sm', disabled: busy !== '', onClick: restartHost }, t('restartNow')))
             : null)
+        : null,
+
+      // The launcher refuses `--profile desktop` outright, so these get a
+      // reason instead of a button that could only ever fail.
+      (plugins && plugins.blocked || []).length
+        ? h(Card, { title: t('pluginsBlockedTitle'), hint: t('pluginsBlockedHint') },
+          (plugins.blocked || []).map((item) =>
+            h('div', { key: `${item.profile}/${item.name}/${item.kind}`, className: 'dgs-row dgs-between dgs-list-item' },
+              h('span', null,
+                h('span', { className: 'dgs-strong' }, item.name),
+                h('span', { className: 'dgs-hint' }, ` · ${item.profile} · ${item.kind === 'install' ? item.spec : `${item.from} → ${item.to}`}`)),
+              h('span', { className: 'dgs-hint' }, item.reason))))
         : null,
 
       h(Card, { title: t('cloudPluginsTitle'), hint: t('cloudPluginsHint') },
