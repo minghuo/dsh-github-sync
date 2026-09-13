@@ -22,6 +22,8 @@ let gh
 let realFetch
 let route
 let disposers = []
+/** Flipped by one test to model a read-only token. */
+let denyWrites = false
 
 /** Translate the fake GitHub object into the REST replies the client expects. */
 function githubFetchServer(fake) {
@@ -39,6 +41,12 @@ function githubFetchServer(fake) {
     const owner = 'acme'
     const repo = 'dsh-backup'
     const match = (re) => path.match(re)
+
+    // A token that can read but not write — GitHub's answer is 403 with this
+    // exact message, and it is worth its own explanation.
+    if (denyWrites && method !== 'GET') {
+      return send(403, { message: 'Resource not accessible by personal access token' })
+    }
 
     if (method === 'GET' && path === `/repos/${owner}/${repo}`) {
       return send(200, { full_name: `${owner}/${repo}`, private: true, default_branch: 'main', permissions: { push: true } })
@@ -230,6 +238,18 @@ test('an unparsable repository is refused', async () => {
   const bad = await callRoute('PUT', '/dsh-github-sync/api/settings', { repoUrl: 'not a repo' })
   assert.equal(bad.status, 400)
   assert.match(bad.body.error, /无法解析仓库地址/)
+})
+
+test('a read-only token is told which permission is missing', async () => {
+  denyWrites = true
+  try {
+    const result = await callRoute('POST', '/dsh-github-sync/api/sync', {})
+    assert.equal(result.status, 400)
+    assert.match(result.body.error, /令牌权限不足/)
+    assert.match(result.body.error, /Contents 设为 Read and write/)
+  } finally {
+    denyWrites = false
+  }
 })
 
 test('a repository the token cannot see explains itself instead of saying Not Found', async () => {

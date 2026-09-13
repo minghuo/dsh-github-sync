@@ -323,6 +323,13 @@ function safeLocalSessionPath(home, workspace, session, file) {
 function explainError(error) {
   const status = error && error.status
   const message = String((error && error.message) || error)
+  if (status === 403 && /resource not accessible by personal access token/i.test(message)) {
+    return [
+      '令牌权限不足（HTTP 403）：这个 fine-grained PAT 对该仓库只有读权限，写不进去。',
+      '请到 GitHub → Settings → Developer settings → Fine-grained tokens → 该令牌 → Permissions → Repository permissions，',
+      '把 Contents 设为 Read and write（要用 PR 模式再加 Pull requests: Read and write），保存后重试。',
+    ].join('')
+  }
   if (status === 404 && /\/repos\//.test(String((error && error.path) || message))) {
     const slug = (message.match(/\/repos\/([^/]+\/[^/\s)]+)/) || [])[1] || '该仓库'
     return [
