@@ -597,6 +597,21 @@ export async function remoteInventory({ client, owner, repo, branch = 'main' }) 
   }
 
   const instances = [...byInstance.values()].sort((a, b) => String(a.instanceId).localeCompare(String(b.instanceId)))
+
+  // "When was this machine last backed up?" is a property of its manifest's
+  // last commit, not of the branch head — every push from any machine moves
+  // the head. A manifest is fixed size, so this is one small query per
+  // instance rather than a walk over its session blobs.
+  if (typeof client.lastCommitDate === 'function') {
+    await Promise.all(
+      instances.map(async (instance) => {
+        instance.lastSyncAt = await client
+          .lastCommitDate(owner, repo, branch, `${instancePrefix(instance.instanceId)}/${MANIFEST_NAME}`)
+          .catch(() => undefined)
+      }),
+    )
+  }
+
   return { commit: head, commitDate, tree: map, instances, truncated }
 }
 

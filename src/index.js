@@ -817,6 +817,15 @@ export function apply(ctx, config = {}) {
       // arbitrary command to be run.
       actions: planPluginActions(local, others).actions,
       instances: inventory.instances.map((i) => i.instanceId),
+      // Per-machine detail for the cloud list: which profiles it declares and
+      // when it last synced, so a user can tell whose version they are reading.
+      instanceInfo: inventory.instances.map((i) => ({
+        instanceId: i.instanceId,
+        lastSyncAt: i.lastSyncAt,
+        branchUpdatedAt: inventory.commitDate,
+        profiles: Object.keys(cloud[i.instanceId] || {}),
+        packages: Object.values(cloud[i.instanceId] || {}).reduce((n, p) => n + p.packages.length, 0),
+      })),
     }
   }
 
@@ -972,6 +981,40 @@ export function apply(ctx, config = {}) {
                 instanceId: await ensureInstanceId(),
               })
               sendJson(res, 200, report)
+              return
+            }
+
+            // POST /restart — relaunch this dsh process, so freshly installed
+            // plugins actually mount
+            if (method === 'POST' && route === `${API_PREFIX}/restart`) {
+              const bin = process.argv[1]
+              if (!bin || !bin.endsWith('.js')) {
+                sendJson(res, 400, { error: '自动重启不可用：这不是通过 dsh CLI 启动的进程，请手动重启。' })
+                return
+              }
+              const args = process.argv.slice(2)
+              sendJson(res, 200, { restarting: true, command: `${bin} ${args.join(' ')}` })
+              log.info('收到重启请求：稍后重新拉起 dsh')
+              // A detached helper waits for this process to release the port and
+              // only then starts the replacement, so the new one can bind.
+              const helper = [
+                "const { spawn } = require('node:child_process')",
+                'setTimeout(() => {',
+                '  const child = spawn(process.argv[1], process.argv.slice(2), { detached: true, stdio: "ignore", windowsHide: true })',
+                '  child.unref()',
+                '}, 1200)',
+              ].join('\n')
+              try {
+                spawn(process.execPath, ['-e', helper, process.execPath, bin, ...args], {
+                  detached: true,
+                  stdio: 'ignore',
+                  windowsHide: true,
+                }).unref()
+              } catch (error) {
+                log.error(`重启失败：${(error && error.message) || error}`)
+                return
+              }
+              setTimeout(() => process.exit(0), 500)
               return
             }
 

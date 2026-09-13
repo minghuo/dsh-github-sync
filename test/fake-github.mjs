@@ -72,6 +72,18 @@ export function createFakeGithub({ branch = 'main', initialFiles = {} } = {}) {
       return { map: new Map(map), truncated: false, sha }
     },
 
+    /**
+     * When a path last changed. A flat timestamp: the fake does not model
+     * per-path history, only that the query is made and its answer surfaced.
+     */
+    async lastCommitDate(owner, repo, branch, path) {
+      calls.push(['lastCommitDate', path])
+      const head = refs.get(branch)
+      if (!head) return undefined
+      const commit = commits.get(head)
+      return (commit && commit.committer && commit.committer.date) || undefined
+    },
+
     async getBlob(owner, repo, sha) {
       const buf = blobs.get(sha)
       if (!buf) throw new Error(`no blob ${sha}`)

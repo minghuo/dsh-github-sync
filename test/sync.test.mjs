@@ -280,6 +280,9 @@ test('compareWithRemote says what a push would send and a pull would bring', asy
   const plan = await planFor(home)
   await pushSnapshot({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE, plan })
 
+  const inventory = await remoteInventory({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main' })
+  assert.equal(inventory.instances[0].lastSyncAt !== undefined, true, 'each machine is dated by its own manifest commit')
+
   const identical = await compareWithRemote({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE, plan })
   assert.equal(identical.groups.sessions.created + identical.groups.sessions.updated, 0)
   assert.equal(identical.groups.sessions.unchanged, 2)

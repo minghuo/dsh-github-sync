@@ -176,6 +176,24 @@ export function createGithubClient({ token, apiBase = DEFAULT_API_BASE, fetchImp
     },
 
     /**
+     * When the given path was last changed on the branch.
+     *
+     * One commits query with `path=`, which is how the UI dates each machine's
+     * backup: the branch head is common to every machine, so it cannot say
+     * when *this* machine last synced.
+     */
+    async lastCommitDate(owner, repo, branch, path) {
+      const { status, json } = await request(
+        'GET',
+        `/repos/${enc(owner)}/${enc(repo)}/commits?sha=${enc(branch)}&path=${enc(path)}&per_page=1`,
+        { allow: [404, 409, 422] },
+      )
+      if (status !== 200 || !Array.isArray(json) || json.length === 0) return undefined
+      const commit = json[0].commit
+      return (commit && (commit.committer?.date || commit.author?.date)) || undefined
+    },
+
+    /**
      * Every path in a tree (recursive), as `Map<path, {sha,size,type}>`.
      * GitHub truncates very large listings; `truncated` is surfaced so callers
      * can refuse instead of silently syncing a partial view.

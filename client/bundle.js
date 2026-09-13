@@ -199,6 +199,21 @@ window.__ModuleLoader__.load({
       applyDone: '已处理',
       applyNone: '没有需要安装或更新的插件',
       applyRestart: '重启 dsh web 后生效',
+      restoring: '恢复中…',
+      progressInstall: '正在安装插件',
+      restartNow: '重启 dsh',
+      restartConfirm: '重启会中断当前正在进行的对话与任务。确定现在重启吗？',
+      restartIssued: '已发出重启请求',
+      restartPending: 'dsh 正在重启，约 5 秒后刷新本页即可继续（登录状态保留）',
+      restartReload: '如果刷新后仍无响应，请在终端确认 dsh web 是否已重新启动',
+      restartCardTitle: '重启 dsh',
+      restartCardHint: '插件安装/更新、切换 profile 之后都需要重启进程才会生效。重启后刷新本页即可，登录状态会保留。',
+      cloudPluginsTitle: '云端插件列表',
+      cloudPluginsHint: '各机器备份里声明的插件，以及那台机器最后一次同步到云端的时间。',
+      cloudPluginsEmpty: '云端还没有任何插件清单。',
+      cloudSyncedAt: '同步于',
+      cloudSyncedUnknown: '同步时间未知',
+      thisMachine: '本机',
       copy: '复制',
       copyCommand: '已复制命令',
       hostOutdated: '宿主半边是旧版本（v{version}，接口 {api}）：插件清单、与云端比较、进度显示需要重启 dsh web 才会出现——宿主代码只在进程启动时加载，刷新页面不会更新它。',
@@ -349,6 +364,21 @@ window.__ModuleLoader__.load({
       applyDone: 'Handled',
       applyNone: 'Nothing to install or update',
       applyRestart: 'restart dsh web to apply',
+      restoring: 'Restoring…',
+      progressInstall: 'Installing plugins',
+      restartNow: 'Restart dsh',
+      restartConfirm: 'Restarting interrupts the conversation and tasks in progress. Restart now?',
+      restartIssued: 'Restart requested',
+      restartPending: 'dsh is restarting — reload this page in about 5 seconds (you stay signed in)',
+      restartReload: 'if the page still does not respond, check the terminal that dsh web restarted',
+      restartCardTitle: 'Restart dsh',
+      restartCardHint: 'Installing or updating a plugin only takes effect when the process restarts. Your login survives the restart.',
+      cloudPluginsTitle: 'Plugins in the cloud',
+      cloudPluginsHint: 'Plugins declared in each machine\'s backup, and when that machine last synced.',
+      cloudPluginsEmpty: 'No plugin manifests in the cloud yet.',
+      cloudSyncedAt: 'synced',
+      cloudSyncedUnknown: 'sync time unknown',
+      thisMachine: 'this machine',
       copy: 'Copy',
       copyCommand: 'Command copied',
       hostOutdated: 'The host half is an older build (v{version}, api {api}): the plugin inventory, cloud comparison and progress display need a dsh web restart — host code only loads when the process starts, refreshing the page does not update it.',
@@ -508,6 +538,7 @@ window.__ModuleLoader__.load({
       const [plugins, setPlugins] = useState(null)
       const [compare, setCompare] = useState(null)
       const [applyResult, setApplyResult] = useState(null)
+      const [restarting, setRestarting] = useState(false)
       const [verifyResult, setVerifyResult] = useState(null)
       const toastTimer = useRef(null)
 
@@ -681,6 +712,33 @@ window.__ModuleLoader__.load({
         setPlugins(await get('/plugins'))
       })
 
+      /** The progress strip, shared by the page top and the panel that started the work. */
+      const renderProgress = () => {
+        if (!progress || !progress.op) return null
+        const percent = progress.total ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 8
+        const label = progress.op === 'install' ? 'progressInstall' : progress.op === 'pull' || progress.op === 'restore' ? 'progressRestore' : 'progressSync'
+        return h('div', { className: 'dgs-progress' },
+          h('div', { className: 'dgs-progress-track' },
+            h('span', { className: 'dgs-progress-fill', style: { width: `${percent}%` } })),
+          h('span', { className: 'dgs-hint' },
+            `${t(label)} · ${t(`phase_${progress.phase}`) || progress.phase}`,
+            progress.total ? ` · ${progress.done}/${progress.total}` : ''))
+      }
+
+      /**
+       * Restart the dsh process so freshly installed plugins mount.
+       *
+       * The browser credential is stored and reused across boots, so the page stays
+       * signed in — a reload is all that is needed afterwards.
+       */
+      const restartHost = () => run('restart', async () => {
+        const confirmed = typeof window === 'undefined' || typeof window.confirm !== 'function' || window.confirm(t('restartConfirm'))
+        if (!confirmed) return
+        await post('/restart', {})
+        setRestarting(true)
+        notify(t('restartIssued'))
+      })
+
       const loadCompare = () => run('compare', async () => {
         setCompare(await get('/compare'))
       })
@@ -789,17 +847,13 @@ window.__ModuleLoader__.load({
             t('hostOutdated', { version: status.version || '?', api: status.api === undefined ? t('hostApiNone') : status.api }))
           : null,
 
-        // Live progress for whatever long operation is running.
-        progress && progress.op
-          ? h('div', { className: 'dgs-progress' },
-            h('div', { className: 'dgs-progress-track' },
-              h('span', {
-                className: 'dgs-progress-fill',
-                style: { width: `${progress.total ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 8}%` },
-              })),
-            h('span', { className: 'dgs-hint' },
-              `${t(progress.op === 'pull' || progress.op === 'restore' ? 'progressRestore' : 'progressSync')} · ${t(`phase_${progress.phase}`) || progress.phase}`,
-              progress.total ? ` · ${progress.done}/${progress.total}` : ''))
+        // Live progress for whatever long operation is running. It also appears
+        // inside the panel that started the work, because that is where the user is
+        // looking — a strip at the top of a scrolled page is easy to miss.
+        renderProgress(),
+
+        restarting
+          ? h('div', { className: 'dgs-note dgs-ok' }, `${t('restartPending')} —— ${t('restartReload')}`)
           : null,
 
         h('nav', { className: 'dgs-tabs' },
@@ -1054,6 +1108,7 @@ window.__ModuleLoader__.load({
                     h('option', { key: workspace.key, value: workspace.key }, workspace.path || workspace.key))))
                 : null,
               preview ? h('p', { className: 'dgs-hint' }, t('restorePreview', { n: preview.files.length })) : null,
+              renderProgress(),
               outcome
                 ? h('div', { className: outcome.ok ? 'dgs-note dgs-ok' : 'dgs-note dgs-warn' },
                   outcome.ok
@@ -1081,7 +1136,8 @@ window.__ModuleLoader__.load({
                 : null,
               h('div', { className: 'dgs-row' },
                 h(Button, { variant: 'outline', size: 'sm', onClick: doPreview, disabled: busy !== '' }, busy === 'preview' ? t('previewing') : t('preview')),
-                h(Button, { variant: 'primary', size: 'sm', onClick: () => doRestore(false), disabled: busy !== '' }, t('confirmRestore')),
+                h(Button, { variant: 'primary', size: 'sm', onClick: () => doRestore(false), disabled: busy !== '' },
+                  busy === 'restore' ? t('restoring') : t('confirmRestore')),
                 h(Button, { variant: 'outline', size: 'sm', onClick: () => { setRestore(null); setPreview(null); setOutcome(null) } }, t('cancel'))))
             : null),
 
@@ -1153,8 +1209,37 @@ window.__ModuleLoader__.load({
                 h('div', { key: `${a.profile}/${a.name}/${a.kind}` },
                   `${a.ok ? '✔' : '✘'} ${a.command}`,
                   a.ok ? '' : h('pre', { className: 'dgs-code' }, a.output))),
-              applyResult.note ? h('div', { className: 'dgs-hint' }, applyResult.note) : null)
+              applyResult.note ? h('div', { className: 'dgs-hint' }, applyResult.note) : null,
+              // Installing is only half the job — a plugin mounts when the process
+              // starts, so offer the restart right here.
+              applyResult.restartRequired
+                ? h('div', { className: 'dgs-row' },
+                  h(Button, { variant: 'primary', size: 'sm', disabled: busy !== '', onClick: restartHost }, t('restartNow')))
+                : null)
             : null,
+
+          h(Card, { title: t('cloudPluginsTitle'), hint: t('cloudPluginsHint') },
+            !plugins
+              ? h('p', { className: 'dgs-hint' }, t('loading'))
+              : (plugins.instanceInfo || []).length === 0
+                ? h('p', { className: 'dgs-hint' }, t('cloudPluginsEmpty'))
+                : plugins.instanceInfo.map((info) =>
+                  h('div', { key: info.instanceId, className: 'dgs-list-item' },
+                    h('div', { className: 'dgs-row dgs-between' },
+                      h('span', null,
+                        h('span', { className: 'dgs-strong' }, info.instanceId),
+                        info.instanceId === (status && status.instanceId)
+                          ? h('span', { className: 'dgs-pill' }, t('thisMachine'))
+                          : null),
+                      h('span', { className: 'dgs-hint' },
+                        info.lastSyncAt ? `${t('cloudSyncedAt')} ${formatTime(info.lastSyncAt)}` : t('cloudSyncedUnknown'))),
+                    Object.entries((plugins.cloud || {})[info.instanceId] || {}).map(([profile, data]) =>
+                      h('div', { key: profile, className: 'dgs-subrow' },
+                        h('div', { className: 'dgs-hint' }, `${profile} · ${(data.packages || []).length} ${t('pluginsDeps')}`),
+                        (data.packages || []).map((pkg) =>
+                          h('div', { key: pkg.name, className: 'dgs-row dgs-between dgs-subrow' },
+                            h('span', { className: 'dgs-hint' }, pkg.name),
+                            h('span', { className: 'dgs-hint' }, pkg.spec)))))))),
 
           plugins && plugins.configured === false
             ? h('p', { className: 'dgs-hint' }, t('notConfigured'))
@@ -1196,7 +1281,10 @@ window.__ModuleLoader__.load({
             h(Field, { label: t('profilesLabel') },
               h('input', { className: 'dgs-input', value: settings.profiles || '', onChange: (e) => patch('profiles', e.target.value) })),
             h('div', { className: 'dgs-row' },
-              h(Button, { variant: 'primary', size: 'sm', onClick: save, disabled: busy !== '' }, t('save'))))),
+              h(Button, { variant: 'primary', size: 'sm', onClick: save, disabled: busy !== '' }, t('save')))),
+          h(Card, { title: t('restartCardTitle'), hint: t('restartCardHint') },
+            h('div', { className: 'dgs-row' },
+              h(Button, { variant: 'outline', size: 'sm', onClick: restartHost, disabled: busy !== '' }, t('restartNow'))))),
 
         viewer
           ? h('div', { className: 'dgs-overlay', onClick: () => setViewer(null) },
