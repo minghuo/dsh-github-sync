@@ -74,14 +74,19 @@ const API_PREFIX = `/${NAME}/api`
  */
 const API_VERSION = 3
 
-/** This package's own version, for the "your host half is old" message. */
-function ownVersion() {
+/**
+ * The version of the code **currently loaded**, for the "your host half is
+ * old" message. Read once at import time on purpose: reading it per request
+ * would report whatever is on disk now, which is exactly what a stale process
+ * does *not* run — the whole point of the number is to match `api`.
+ */
+const OWN_VERSION = (() => {
   try {
     return JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
   } catch {
     return undefined
   }
-}
+})()
 const MAX_BODY_BYTES = 256 * 1024
 const MAX_TEXT_BYTES = 512 * 1024
 const HISTORY_LIMIT = 20
@@ -959,7 +964,7 @@ export function apply(ctx, config = {}) {
                 snapshots: { count: snapshots.length, latest: snapshots[0] ? snapshots[0].name : null, bytes: snapshots.reduce((n, s) => n + s.bytes, 0) },
                 capabilities: { zstd: zstdAvailable(), settingsService: Boolean(settingsScope()) },
                 api: API_VERSION,
-                version: ownVersion(),
+                version: OWN_VERSION,
               })
               return
             }
