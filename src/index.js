@@ -72,7 +72,7 @@ const API_PREFIX = `/${NAME}/api`
  * it, and the only way for the client to notice is for the host to say what it
  * speaks.
  */
-const API_VERSION = 3
+const API_VERSION = 4
 
 /**
  * The version of the code **currently loaded**, for the "your host half is
@@ -338,6 +338,32 @@ function safeLocalSessionPath(home, workspace, session, file) {
   if (rel.startsWith('..') || rel.includes(`..${sep}`)) return null
   if (!target.startsWith(root)) return null
   return target
+}
+
+/**
+ * Turn a pnpm failure into something the user can act on.
+ *
+ * pnpm 11 refuses to install when a dependency wants to run a build script and
+ * nothing has said whether it may — `ERR_PNPM_IGNORED_BUILDS`. It is a policy
+ * question about the *profile*, not about the plugin being installed, and it is
+ * invisible unless the ignored packages are named.
+ */
+function explainPnpmFailure(output) {
+  const text = String(output || '')
+  if (!/ERR_PNPM_IGNORED_BUILDS|Ignored build scripts/.test(text)) return undefined
+  const line = text.split(/\r?\n/).find((l) => /Ignored build scripts/.test(l)) || ''
+  const packages = line
+    .replace(/.*Ignored build scripts:\s*/, '')
+    .split(/[,\s]+/)
+    .map((s) => s.trim())
+    .filter((s) => /@\d/.test(s))
+  return [
+    'pnpm 11 要求对「带构建脚本的依赖」显式表态，否则整个安装以非零退出。',
+    packages.length ? `缺少表态的包：${packages.join(', ')}` : '',
+    '解决：在该 profile 目录运行 `pnpm approve-builds` 逐项选择；或把这些包补进 pnpm-workspace.yaml 的 allowBuilds（不需要编译的写 false 也能通过）。',
+  ]
+    .filter(Boolean)
+    .join(' ')
 }
 
 /**
@@ -1005,12 +1031,27 @@ export function apply(ctx, config = {}) {
               log.info('收到重启请求：稍后重新拉起 dsh')
               // A detached helper waits for this process to release the port and
               // only then starts the replacement, so the new one can bind.
+              // The replacement must not start until the port is actually free:
+              // starting early is `EADDRINUSE`, which kills the new process and
+              // leaves nothing running at all.
               const helper = [
                 "const { spawn } = require('node:child_process')",
-                'setTimeout(() => {',
-                '  const child = spawn(process.argv[1], process.argv.slice(2), { detached: true, stdio: "ignore", windowsHide: true })',
+                "const net = require('node:net')",
+                'const args = process.argv.slice(2)',
+                "const at = args.indexOf('--port')",
+                'const port = at >= 0 && args[at + 1] ? Number(args[at + 1]) : 3080',
+                'let waited = 0',
+                'const launch = () => {',
+                '  const child = spawn(process.argv[1], args, { detached: true, stdio: "ignore", windowsHide: true })',
                 '  child.unref()',
-                '}, 1200)',
+                '}',
+                'const probe = () => {',
+                '  const server = net.createServer()',
+                '  server.once("error", () => { waited += 250; if (waited > 20000) launch(); else setTimeout(probe, 250) })',
+                '  server.once("listening", () => server.close(() => launch()))',
+                '  server.listen(port, "127.0.0.1")',
+                '}',
+                'probe()',
               ].join('\n')
               try {
                 spawn(process.execPath, ['-e', helper, process.execPath, bin, ...args], {
@@ -1065,7 +1106,13 @@ export function apply(ctx, config = {}) {
                   const action = targets[i]
                   watch.phase('安装插件', { done: i, total: targets.length, current: action.command })
                   const run = await addPlugin(action.profile, action.arg)
-                  applied.push({ ...action, ok: run.code === 0, code: run.code, output: run.output.split(/\r?\n/).filter(Boolean).slice(-6).join('\n') })
+                  applied.push({
+                    ...action,
+                    ok: run.code === 0,
+                    code: run.code,
+                    output: run.output.split(/\r?\n/).filter(Boolean).slice(-6).join('\n'),
+                    hint: explainPnpmFailure(run.output),
+                  })
                   log.info(`插件${action.kind === 'install' ? '安装' : '更新'}：${action.command} → ${run.code === 0 ? '成功' : `失败(${run.code})`}`)
                 }
                 watch.phase('安装插件', { done: targets.length, total: targets.length })

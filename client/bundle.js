@@ -559,6 +559,8 @@ window.__ModuleLoader__.load({
       // Running install/update needs the newer route; an older host still gets the
       // copyable commands, just not the buttons.
       const canApplyPlugins = hostSupportsApi(status, 3)
+      // `/restart` and the richer cloud listing arrived with API 4.
+      const canRestart = hostSupportsApi(status, 4)
 
       const notify = (message) => {
         setToast(message)
@@ -1212,11 +1214,12 @@ window.__ModuleLoader__.load({
               applyResult.applied.map((a) =>
                 h('div', { key: `${a.profile}/${a.name}/${a.kind}` },
                   `${a.ok ? '✔' : '✘'} ${a.command}`,
-                  a.ok ? '' : h('pre', { className: 'dgs-code' }, a.output))),
+                  a.ok ? '' : h('pre', { className: 'dgs-code' }, a.output),
+                  a.hint ? h('div', { className: 'dgs-hint' }, a.hint) : null)),
               applyResult.note ? h('div', { className: 'dgs-hint' }, applyResult.note) : null,
               // Installing is only half the job — a plugin mounts when the process
               // starts, so offer the restart right here.
-              applyResult.restartRequired
+              applyResult.restartRequired && canRestart
                 ? h('div', { className: 'dgs-row' },
                   h(Button, { variant: 'primary', size: 'sm', disabled: busy !== '', onClick: restartHost }, t('restartNow')))
                 : null)
@@ -1298,9 +1301,11 @@ window.__ModuleLoader__.load({
               h('input', { className: 'dgs-input', value: settings.profiles || '', onChange: (e) => patch('profiles', e.target.value) })),
             h('div', { className: 'dgs-row' },
               h(Button, { variant: 'primary', size: 'sm', onClick: save, disabled: busy !== '' }, t('save')))),
-          h(Card, { title: t('restartCardTitle'), hint: t('restartCardHint') },
-            h('div', { className: 'dgs-row' },
-              h(Button, { variant: 'outline', size: 'sm', onClick: restartHost, disabled: busy !== '' }, t('restartNow'))))),
+          canRestart
+            ? h(Card, { title: t('restartCardTitle'), hint: t('restartCardHint') },
+              h('div', { className: 'dgs-row' },
+                h(Button, { variant: 'outline', size: 'sm', onClick: restartHost, disabled: busy !== '' }, t('restartNow'))))
+            : null),
 
         viewer
           ? h('div', { className: 'dgs-overlay', onClick: () => setViewer(null) },
