@@ -223,6 +223,14 @@ async function cmdRepo() {
     console.log('  · 仓库已存在，改为推送当前工作树')
   }
 
+  // Only touched when asked for: an existing repository's description is the
+  // owner's, and silently rewriting it would be a surprise.
+  const description = option('description', '')
+  if (description && !dryRun) {
+    await gh('PATCH', `/repos/${slug}`, { body: { description, homepage: `https://github.com/${slug}` } })
+    console.log(`  ✔ 描述已更新`)
+  }
+
   if (exists || dryRun) {
     const result = await pushTree({ owner, repo, branch, message: `release: ${pkg.name}@${pkg.version}` })
     if (result.dryRun) console.log(`  + 将写入 ${result.entries} 个树条目`)
