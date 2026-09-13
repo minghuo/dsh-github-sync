@@ -30,14 +30,16 @@ instances/
 ## 安装
 
 ```bash
-dsh plugin --profile web add dsh-github-sync -w
+dsh plugin --profile web add github:minghuo/dsh-github-sync
 ```
 
-装完重启 `dsh web` 生效。本地开发时可以装路径：
+装完重启 `dsh web` 生效。发布到 npm 之后也可以直接用包名安装：
 
 ```bash
-dsh plugin --profile web add "file:D:\path\to\dsh-github-sync"
+dsh plugin --profile web add dsh-github-sync
 ```
+
+更新到最新提交：`dsh plugin --profile web update dsh-github-sync`，再重启 `dsh web`。
 
 ## 使用
 

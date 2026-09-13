@@ -58,7 +58,10 @@ const prim = (kind, fallback) => {
 const Button = prim('Button')
 
 const NS = 'dsh-github-sync'
+const CLIENT_NAME = 'dsh-github-sync'
 const API = '/dsh-github-sync/api'
+/** Identity of the injected stylesheet, in the shell's `data-plugin-css` form. */
+const STYLE_TAG_ID = `${CLIENT_NAME}/client.css`
 
 // ── Copy ─────────────────────────────────────────────────────────────────
 
@@ -69,7 +72,8 @@ const ZH = {
   tabSessions: '会话备份',
   tabSnapshots: '本地快照',
   tabAdvanced: '高级',
-  repoLabel: 'GitHub 仓库',
+  repoCardTitle: '仓库',
+  repoUrlLabel: '仓库地址',
   repoPlaceholder: 'owner/repo 或 https://github.com/owner/repo',
   repoHint: '必须是私有仓库；会话日志含本机绝对路径。',
   branchLabel: '分支',
@@ -168,7 +172,8 @@ const EN = {
   tabSessions: 'Sessions',
   tabSnapshots: 'Snapshots',
   tabAdvanced: 'Advanced',
-  repoLabel: 'GitHub repository',
+  repoCardTitle: 'Repository',
+  repoUrlLabel: 'Repository address',
   repoPlaceholder: 'owner/repo or https://github.com/owner/repo',
   repoHint: 'Must be private — session logs contain local absolute paths.',
   branchLabel: 'Branch',
@@ -262,13 +267,24 @@ const EN = {
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
+/**
+ * Inject the stylesheet once.
+ *
+ * A `<style>` element is the only thing that turns this text into rules: a
+ * `<div>` whose `innerHTML` is the CSS merely renders it as text, leaving every
+ * element at browser defaults — labels sitting inline with their inputs and
+ * fields collapsed against each other. The `data-plugin-css` marker is the
+ * shell's own convention, so a reload or a second surface cannot double-inject.
+ */
 function ensureStyles() {
-  if (typeof document === 'undefined' || document.getElementById('dgs-styles')) return
-  const holder = document.createElement('div')
-  holder.id = 'dgs-styles'
-  holder.style.display = 'none'
-  holder.innerHTML = STYLE
-  document.head.appendChild(holder)
+  if (typeof document === 'undefined') return
+  const selector = `style[data-plugin-css=${JSON.stringify(STYLE_TAG_ID)}]`
+  if (typeof document.querySelector === 'function' && document.querySelector(selector) !== null) return
+  const tag = document.createElement('style')
+  tag.dataset.plugin = CLIENT_NAME
+  tag.dataset.pluginCss = STYLE_TAG_ID
+  tag.textContent = STYLE
+  document.head.appendChild(tag)
 }
 
 function formatBytes(n) {
@@ -309,13 +325,14 @@ const post = (path, body) => api(path, { method: 'POST', body: JSON.stringify(bo
 
 // ── Small presentational pieces ──────────────────────────────────────────
 
-function Field({ label, hint, children }) {
+function Field({ label, hint, hintTone, children }) {
+  const hintClass = hintTone === 'ok' ? 'dgs-hint dgs-ok' : hintTone === 'warn' ? 'dgs-hint dgs-warn' : 'dgs-hint'
   return h(
     'label',
     { className: 'dgs-field' },
     h('span', { className: 'dgs-field-label' }, label),
     children,
-    hint ? h('span', { className: 'dgs-hint' }, hint) : null,
+    hint ? h('span', { className: hintClass }, hint) : null,
   )
 }
 
@@ -554,26 +571,38 @@ function SettingsSection({ t }) {
               status.lastResult.pr ? h('span', { className: 'dgs-pill dgs-pill-brand' }, `${t('resultPr')} #${status.lastResult.pr.number} · ${status.lastResult.pr.state}`) : null))
           : null),
 
-      h(Card, { title: t('repoLabel'), hint: t('repoHint') },
-        h(Field, { label: t('repoLabel') },
+      h(Card, { title: t('repoCardTitle'), hint: t('repoHint') },
+        h(Field, { label: t('repoUrlLabel') },
           h('input', {
             className: 'dgs-input',
             value: settings.repoUrl || '',
             placeholder: t('repoPlaceholder'),
+            spellCheck: false,
             onChange: (event) => patch('repoUrl', event.target.value),
           })),
-        h('div', { className: 'dgs-grid2' },
+        h('div', { className: 'dgs-field-row' },
           h(Field, { label: t('branchLabel') },
-            h('input', { className: 'dgs-input', value: settings.branch || 'main', onChange: (event) => patch('branch', event.target.value) })),
-          h(Field, { label: t('tokenLabel'), hint: settings.hasToken ? t('tokenStored') : t('tokenMissing') },
             h('input', {
               className: 'dgs-input',
-              type: 'password',
-              value: tokenInput,
-              placeholder: t('tokenPlaceholder'),
-              onChange: (event) => setTokenInput(event.target.value),
-            }))),
-        h('div', { className: 'dgs-row' },
+              value: settings.branch || 'main',
+              spellCheck: false,
+              onChange: (event) => patch('branch', event.target.value),
+            })),
+          h(Field, {
+            label: t('tokenLabel'),
+            hint: settings.hasToken ? t('tokenStored') : t('tokenMissing'),
+            hintTone: settings.hasToken ? 'ok' : 'warn',
+          },
+          h('input', {
+            className: 'dgs-input',
+            type: 'password',
+            value: tokenInput,
+            placeholder: t('tokenPlaceholder'),
+            autoComplete: 'off',
+            spellCheck: false,
+            onChange: (event) => setTokenInput(event.target.value),
+          }))),
+        h('div', { className: 'dgs-actions' },
           h(Button, { variant: 'primary', size: 'sm', onClick: save, disabled: busy !== '' }, busy === 'save' ? t('saving') : t('save')),
           settings.hasToken
             ? h(Button, { variant: 'outline', size: 'sm', onClick: () => run('clear', async () => {
@@ -584,7 +613,7 @@ function SettingsSection({ t }) {
             }) }, t('clearToken'))
             : null),
         verifyResult
-          ? h('p', { className: verifyResult.ok ? 'dgs-ok' : 'dgs-warn' },
+          ? h('p', { className: verifyResult.ok ? 'dgs-note dgs-ok' : 'dgs-note dgs-warn' },
             verifyResult.ok
               ? `${t('verifyOk')} · ${verifyResult.repo} · ${verifyResult.defaultBranch}${verifyResult.user ? ` · ${verifyResult.user}` : ''}`
               : (verifyResult.error || t('verifyPrivateMissing')))
@@ -768,48 +797,56 @@ function decodeWorkspace(key) {
 }
 
 const STYLE = `
-.dgs-root { display: flex; flex-direction: column; gap: 14px; color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family); font-size: var(--dsw-font-sm-14, 14px); }
-.dgs-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-.dgs-title { margin: 0; font-size: 16px; font-weight: 600; }
-.dgs-hint { margin: 2px 0 0; color: var(--dsw-alias-label-tertiary); font-size: var(--dsw-font-xs-13, 12px); line-height: 1.5; }
+.dgs-root { display: flex; flex-direction: column; gap: 18px; color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family); font-size: var(--dsw-font-sm-14, 14px); line-height: 1.6; }
+.dgs-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.dgs-title { margin: 0; font-size: 17px; font-weight: 600; }
+.dgs-hint { margin: 2px 0 0; color: var(--dsw-alias-label-tertiary); font-size: var(--dsw-font-xs-13, 12px); line-height: 1.6; }
 .dgs-row { display: flex; align-items: center; gap: 8px; }
 .dgs-wrap { flex-wrap: wrap; }
 .dgs-between { justify-content: space-between; width: 100%; }
-.dgs-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--dsw-alias-border-l2); }
-.dgs-tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; padding: 8px 10px; cursor: pointer; color: var(--dsw-alias-label-secondary); font: inherit; }
-.dgs-tab.is-active { color: var(--dsw-alias-label-primary); border-bottom-color: var(--dsw-alias-brand-primary, var(--dsw-alias-state-business-primary)); }
-.dgs-panes { display: flex; flex-direction: column; gap: 14px; }
-.dgs-card { border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-layer-2); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
-.dgs-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.dgs-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--dsw-alias-border-l2); }
+.dgs-tab { appearance: none; background: none; border: 0; border-bottom: 2px solid transparent; padding: 9px 14px; margin-bottom: -1px; cursor: pointer; color: var(--dsw-alias-label-secondary); font: inherit; }
+.dgs-tab:hover { color: var(--dsw-alias-label-primary); }
+.dgs-tab.is-active { color: var(--dsw-alias-label-primary); font-weight: 600; border-bottom-color: var(--dsw-alias-brand-primary, var(--dsw-alias-state-business-primary)); }
+.dgs-panes { display: flex; flex-direction: column; gap: 18px; }
+.dgs-card { border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-layer-2); padding: 18px; display: flex; flex-direction: column; gap: 16px; }
+.dgs-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .dgs-card-title { margin: 0; font-size: 14px; font-weight: 600; }
-.dgs-card-body { display: flex; flex-direction: column; gap: 10px; }
-.dgs-field { display: flex; flex-direction: column; gap: 4px; }
+.dgs-card-body { display: flex; flex-direction: column; gap: 16px; }
+.dgs-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .dgs-field-label { color: var(--dsw-alias-label-secondary); font-size: var(--dsw-font-xs-13, 12px); }
-.dgs-input { width: 100%; box-sizing: border-box; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font: inherit; }
-.dgs-input-sm { max-width: 140px; }
-.dgs-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.dgs-toggle { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 6px 0; }
-.dgs-toggle-text { display: flex; flex-direction: column; }
+.dgs-field-row { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 16px; align-items: start; }
+.dgs-input { width: 100%; box-sizing: border-box; min-width: 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font: inherit; }
+.dgs-input:focus { outline: none; border-color: var(--dsw-alias-brand-primary, var(--dsw-alias-state-business-primary)); }
+.dgs-input::placeholder { color: var(--dsw-alias-label-tertiary); }
+.dgs-input-sm { max-width: 160px; }
+.dgs-grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; align-items: start; }
+.dgs-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 2px; }
+.dgs-toggle { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 10px 0; }
+.dgs-toggle + .dgs-toggle { border-top: 1px solid var(--dsw-alias-border-l2); }
+.dgs-toggle-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .dgs-toggle-label { font-weight: 500; }
-.dgs-switch { width: 16px; height: 16px; margin-top: 3px; accent-color: var(--dsw-alias-brand-primary, var(--dsw-alias-state-business-primary)); }
-.dgs-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
-.dgs-stat { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; padding: 8px 10px; }
+.dgs-switch { width: 18px; height: 18px; margin-top: 2px; flex: none; accent-color: var(--dsw-alias-brand-primary, var(--dsw-alias-state-business-primary)); }
+.dgs-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.dgs-stat { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
+.dgs-note { margin: 0; }
 .dgs-stat-value { font-weight: 600; word-break: break-all; }
 .dgs-stat-label { color: var(--dsw-alias-label-tertiary); font-size: var(--dsw-font-xs-13, 12px); }
 .dgs-result { border-top: 1px solid var(--dsw-alias-border-l2); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .dgs-result-head { color: var(--dsw-alias-label-secondary); font-size: var(--dsw-font-xs-13, 12px); }
 .dgs-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-secondary); font-size: var(--dsw-font-xs-13, 12px); }
 .dgs-pill-brand { background: var(--dsw-alias-state-business-primary); color: var(--dsw-alias-label-primary-inverted, #fff); }
-.dgs-list-item { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; padding: 8px 10px; background: var(--dsw-alias-bg-layer-1); }
-.dgs-subrow { padding-left: 10px; }
-.dgs-sublist { display: flex; flex-direction: column; gap: 4px; padding-top: 4px; border-top: 1px dashed var(--dsw-alias-border-l2); }
+.dgs-list-item { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; padding: 12px 14px; background: var(--dsw-alias-bg-layer-1); }
+.dgs-subrow { padding-left: 12px; }
+.dgs-sublist { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px dashed var(--dsw-alias-border-l2); }
 .dgs-disclosure { appearance: none; background: none; border: 0; padding: 0; cursor: pointer; color: inherit; font: inherit; text-align: left; display: flex; flex-direction: column; gap: 2px; }
 .dgs-link { appearance: none; background: none; border: 0; padding: 0; cursor: pointer; color: var(--dsw-alias-state-business-primary); font: inherit; text-align: left; }
 .dgs-strong { font-weight: 600; word-break: break-all; }
 .dgs-ok { color: var(--dsw-alias-state-business-primary); font-size: var(--dsw-font-xs-13, 12px); }
 .dgs-warn, .dgs-error { color: var(--dsw-alias-state-error-primary); font-size: var(--dsw-font-xs-13, 12px); }
 .dgs-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 60; }
-.dgs-modal { width: min(880px, 92vw); max-height: 82vh; overflow: auto; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--dsw-shadow-lv3); }
+.dgs-modal { width: min(880px, 92vw); max-height: 82vh; overflow: auto; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 14px; box-shadow: var(--dsw-shadow-lv3); }
+@media (max-width: 620px) { .dgs-field-row { grid-template-columns: minmax(0, 1fr); } }
 .dgs-pre { margin: 0; padding: 10px; background: var(--dsw-alias-bg-layer-1); border-radius: 8px; max-height: 60vh; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
 .dgs-toast { position: sticky; bottom: 0; align-self: flex-start; padding: 8px 12px; border-radius: 8px; background: var(--dsw-alias-bg-layer-3); box-shadow: var(--dsw-shadow-lv2); }
 `
@@ -821,12 +858,10 @@ function SettingsSectionSlot({ __t }) {
 
 // ── Plugin plane contract ────────────────────────────────────────────────
 
-const CLIENT_NAME = 'dsh-github-sync'
-
 const plugin = {
   name: CLIENT_NAME,
   inject: ['slots', 'locale'],
-  __internals: { NS, ZH, EN, formatBytes, formatTime, decodeWorkspace },
+  __internals: { NS, ZH, EN, STYLE, STYLE_TAG_ID, ensureStyles, formatBytes, formatTime, decodeWorkspace },
   apply(ctx) {
     let t = (key, vars) => {
       let out = EN[key] || key

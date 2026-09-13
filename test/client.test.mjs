@@ -16,6 +16,33 @@ import vm from 'node:vm'
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
 const bundleSource = fs.readFileSync(new URL('../client/bundle.js', import.meta.url), 'utf8')
 
+/**
+ * The smallest `document` `ensureStyles` can talk to: a head that records what
+ * is appended, and a `querySelector` that finds a stylesheet by the
+ * `data-plugin-css` marker the shell itself uses.
+ */
+function fakeDocument() {
+  const head = {
+    children: [],
+    appendChild(node) {
+      this.children.push(node)
+      return node
+    },
+  }
+  return {
+    head,
+    createElement(tagName) {
+      return { tagName, dataset: {}, textContent: '' }
+    },
+    querySelector(selector) {
+      const match = /^style\[data-plugin-css=(.*)\]$/.exec(selector)
+      if (!match) return null
+      const wanted = JSON.parse(match[1])
+      return head.children.find((node) => node.dataset.pluginCss === wanted) || null
+    },
+  }
+}
+
 /** Evaluate the bundle and return `{ registrations, plugin, ctx }`. */
 function loadClientBundle() {
   const registrations = []
@@ -23,6 +50,7 @@ function loadClientBundle() {
     if (spec === 'react') return null // force the shim hooks
     throw new Error(`unexpected platform module in test: ${spec}`)
   }
+  const document = fakeDocument()
   const context = {
     window: { __ModuleLoader__: { load: (registration) => registrations.push(registration) } },
     require: fakeRequire,
@@ -30,7 +58,7 @@ function loadClientBundle() {
     setTimeout,
     clearTimeout,
     fetch: async () => ({ ok: true, status: 200, text: async () => '{}' }),
-    document: undefined,
+    document,
   }
   vm.createContext(context)
   vm.runInContext(bundleSource, context)
@@ -65,8 +93,27 @@ function loadClientBundle() {
       return () => {}
     },
   }
-  return { registrations, plugin, ctx, slots, locales, effects }
+  return { registrations, plugin, ctx, slots, locales, effects, document }
 }
+
+test('the stylesheet is injected as a <style> element, not as inert text', () => {
+  const { plugin, document } = loadClientBundle()
+  const { ensureStyles, STYLE_TAG_ID, STYLE } = plugin.__internals
+
+  ensureStyles()
+  assert.equal(document.head.children.length, 1)
+
+  const tag = document.head.children[0]
+  assert.equal(tag.tagName, 'style', 'a <div> whose innerHTML is CSS renders as text and styles nothing')
+  assert.equal(tag.dataset.plugin, pkg.name)
+  assert.equal(tag.dataset.pluginCss, STYLE_TAG_ID)
+  assert.equal(tag.textContent, STYLE)
+  assert.match(tag.textContent, /\.dgs-field-row\s*\{[^}]*grid-template-columns/)
+  assert.match(tag.textContent, /\.dgs-field\s*\{[^}]*flex-direction:\s*column/)
+
+  ensureStyles()
+  assert.equal(document.head.children.length, 1, 'a second call must not inject again')
+})
 
 test('the bundle registers under the package name, as the shell requires', () => {
   const { registrations } = loadClientBundle()
