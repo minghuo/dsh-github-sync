@@ -227,6 +227,19 @@ test('an unparsable repository is refused', async () => {
   assert.match(bad.body.error, /无法解析仓库地址/)
 })
 
+test('a repository the token cannot see explains itself instead of saying Not Found', async () => {
+  // GitHub answers 404 for a repo a fine-grained token was never granted, so
+  // the bare message sends people hunting for a typo in the URL.
+  await callRoute('PUT', '/dsh-github-sync/api/settings', { repoUrl: 'acme/never-granted' })
+  const result = await callRoute('POST', '/dsh-github-sync/api/verify', {})
+  assert.equal(result.status, 400)
+  assert.match(result.body.error, /acme\/never-granted/)
+  assert.match(result.body.error, /Repository access/)
+  assert.match(result.body.error, /404 而不是 403/)
+
+  await callRoute('PUT', '/dsh-github-sync/api/settings', { repoUrl: 'acme/dsh-backup' })
+})
+
 test('verify reports the repository as private and writable', async () => {
   const result = await callRoute('POST', '/dsh-github-sync/api/verify', {})
   assert.equal(result.status, 200)

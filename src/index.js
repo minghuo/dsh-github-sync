@@ -311,6 +311,31 @@ function safeLocalSessionPath(home, workspace, session, file) {
   return target
 }
 
+/**
+ * Turn a transport error into something a user can act on.
+ *
+ * The one that matters is 404. GitHub answers 404 — not 403 — for a repository
+ * a fine-grained token has not been granted, which makes "the repository does
+ * not exist" and "your token cannot see it" indistinguishable, and the raw
+ * `Not Found` sends people looking for a typo in the URL instead of at the
+ * token's repository selection.
+ */
+function explainError(error) {
+  const status = error && error.status
+  const message = String((error && error.message) || error)
+  if (status === 404 && /\/repos\//.test(String((error && error.path) || message))) {
+    const slug = (message.match(/\/repos\/([^/]+\/[^/\s)]+)/) || [])[1] || '该仓库'
+    return [
+      `仓库 ${slug} 不可见（HTTP 404）。两种可能：`,
+      '① 地址写错或仓库不存在；',
+      '② 访问令牌没有被授权这个仓库 —— fine-grained PAT 对未授权的仓库返回 404 而不是 403。',
+      '请到 GitHub → Settings → Developer settings → Fine-grained tokens，给该令牌的 Repository access 加上这个仓库，',
+      '并把 Permissions → Contents 设为 Read and write。',
+    ].join('')
+  }
+  return message
+}
+
 /** Zstd is what session logs are compressed with; Node grew support in 22.15. */
 function zstdAvailable() {
   return typeof zlib.zstdDecompressSync === 'function'
@@ -975,7 +1000,7 @@ export function apply(ctx, config = {}) {
 
             sendJson(res, 404, { error: `未知接口 ${method} ${route}` })
           } catch (error) {
-            const message = String((error && error.message) || error)
+            const message = explainError(error)
             log.warn(`${method} ${route} 失败：${message}`)
             sendJson(res, 400, { error: message })
           }
