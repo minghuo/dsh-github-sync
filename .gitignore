@@ -1,0 +1,5 @@
+node_modules/
+.reference/
+.ref-dsh-sync/
+*.log
+.DS_Store

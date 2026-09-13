@@ -1,0 +1,12 @@
+# dsh-github-sync bundle patch: contributes the plugin row into the host
+# composition when this package is installed via `dsh plugin add`.
+#
+# The plugin is HOST-PLANE: it owns no agent-session behaviour, it only mirrors
+# $DSH_HOME (sessions / plugin manifests / settings) to a private GitHub
+# repository and serves its HTTP API over a webServer route. Its client half
+# registers the settings-page surface. It must therefore land in the host
+# composition (this insert), never inside an agent preset.
+
+- insert:
+    - id: dsh-github-sync
+      name: "dsh-github-sync"
