@@ -3,3 +3,6 @@ node_modules/
 .ref-dsh-sync/
 *.log
 .DS_Store
+# scratch files used while debugging this plugin
+.tmp-*
+.pnpm-store/
