@@ -48,7 +48,12 @@ function githubFetchServer(fake) {
     let m
     if (method === 'GET' && (m = match(/^\/repos\/[^/]+\/[^/]+\/git\/ref\/heads\/(.+)$/))) {
       const head = await fake.getBranchHead(owner, repo, decodeURIComponent(m[1]))
-      return head ? send(200, { object: { sha: head } }) : send(404, { message: 'Not Found' })
+      if (head) return send(200, { object: { sha: head } })
+      // GitHub's real shape: 409 on a repository with no commits at all,
+      // 404 when the repository has history but not that branch.
+      return fake.commits.size === 0
+        ? send(409, { message: 'Git Repository is empty.' })
+        : send(404, { message: 'Not Found' })
     }
     if (method === 'GET' && (m = match(/^\/repos\/[^/]+\/[^/]+\/git\/commits\/(.+)$/))) {
       try {

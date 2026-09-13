@@ -72,7 +72,7 @@ async function collectFiles(dir = ROOT, out = []) {
 
 // ── GitHub plumbing ──────────────────────────────────────────────────────
 
-async function gh(method, path, { body, allow404 = false } = {}) {
+async function gh(method, path, { body, allow = [] } = {}) {
   const res = await fetch(path.startsWith('http') ? path : apiBase + path, {
     method,
     headers: {
@@ -91,7 +91,7 @@ async function gh(method, path, { body, allow404 = false } = {}) {
   } catch {
     /* non-JSON */
   }
-  if (!res.ok && !(allow404 && res.status === 404)) {
+  if (!res.ok && !allow.includes(res.status)) {
     const detail = (json && (json.message || json.error)) || text.slice(0, 200)
     throw new Error(`${method} ${path} → HTTP ${res.status}: ${detail}`)
   }
@@ -108,7 +108,9 @@ async function whoami() {
 
 /** Push the working tree as one commit, creating blobs only for what changed. */
 async function pushTree({ owner, repo, branch, message, verbose = true }) {
-  const head = await gh('GET', `/repos/${owner}/${repo}/git/ref/heads/${branch}`, { allow404: true })
+  // 409 as well as 404: a repository with no commits answers "Git Repository
+  // is empty." instead of reporting a missing branch.
+  const head = await gh('GET', `/repos/${owner}/${repo}/git/ref/heads/${branch}`, { allow: [404, 409] })
   const headSha = head.status === 200 ? head.json.object.sha : null
 
   let baseTree
@@ -183,7 +185,7 @@ async function cmdStatus() {
   console.log(`包        ${pkg.name}@${pkg.version}`)
   console.log(`dsh.bundle ${pkg.dsh?.bundle?.patch ? '✔ ' + pkg.dsh.bundle.patch : '✗ 缺失（dsh plugin add 装不上）'}`)
   console.log(`dsh.client ${pkg.dsh?.client?.platform ? '✔ ' + pkg.dsh.client.platform : '—'}`)
-  const { status, json } = await gh('GET', `/repos/${slug}`, { allow404: true })
+  const { status, json } = await gh('GET', `/repos/${slug}`, { allow: [404] })
   if (status === 404) {
     console.log(`仓库      ${slug} → 不存在`)
     return
@@ -201,7 +203,7 @@ async function cmdRepo() {
   const { pkg, owner, repo, branch, slug } = await target()
   console.log(`发布到 ${slug}${dryRun ? '（dry-run）' : ''}`)
 
-  let exists = (await gh('GET', `/repos/${slug}`, { allow404: true })).status === 200
+  let exists = (await gh('GET', `/repos/${slug}`, { allow: [404] })).status === 200
   if (!exists) {
     if (dryRun) {
       console.log(`  + 创建仓库 ${slug}（${flag('private') ? '私有' : '公开'}）`)
@@ -258,7 +260,7 @@ async function cmdRegistry() {
   if (!fs.existsSync(entryFile)) throw new Error(`缺少上架条目文件：${entryFile}`)
   const entryBody = await fsp.readFile(entryFile, 'utf8')
 
-  const repoInfo = await gh('GET', `/repos/${slug}`, { allow404: true })
+  const repoInfo = await gh('GET', `/repos/${slug}`, { allow: [404] })
   if (repoInfo.status === 404) throw new Error(`先发布仓库：node scripts/publish-github.mjs repo`)
   const ageMs = Date.now() - new Date(repoInfo.json.created_at).getTime()
   if (ageMs < MIN_REPO_AGE_MS) {
@@ -279,7 +281,7 @@ async function cmdRegistry() {
 
   await gh('POST', `/repos/${upOwner}/${upRepo}/forks`, { body: {} })
   for (let i = 0; i < 20; i += 1) {
-    const fork = await gh('GET', `/repos/${owner}/${upRepo}`, { allow404: true })
+    const fork = await gh('GET', `/repos/${owner}/${upRepo}`, { allow: [404] })
     if (fork.status === 200) break
     await sleep(3000)
   }

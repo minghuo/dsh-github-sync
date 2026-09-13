@@ -87,7 +87,7 @@ export function createGithubClient({ token, apiBase = DEFAULT_API_BASE, fetchImp
    * One authenticated JSON request.
    * @returns {Promise<{status:number, json:any, text:string, headers:Headers}>}
    */
-  async function request(method, path, { body, accept = 'application/vnd.github+json', raw = false, allow404 = false } = {}) {
+  async function request(method, path, { body, accept = 'application/vnd.github+json', raw = false, allow = [] } = {}) {
     const url = path.startsWith('http') ? path : apiBase + path
     const headers = {
       accept,
@@ -114,7 +114,7 @@ export function createGithubClient({ token, apiBase = DEFAULT_API_BASE, fetchImp
     if (timer) clearTimeout(timer)
 
     if (raw) {
-      if (!res.ok && !(allow404 && res.status === 404)) {
+      if (!res.ok && !allow.includes(res.status)) {
         throw new GithubError(`GitHub 返回 HTTP ${res.status}（${method} ${path}）`, { status: res.status, path })
       }
       return { status: res.status, res }
@@ -128,7 +128,7 @@ export function createGithubClient({ token, apiBase = DEFAULT_API_BASE, fetchImp
       /* non-JSON error page (proxy, outage) */
     }
     if (!res.ok) {
-      if (allow404 && res.status === 404) return { status: 404, json, text, headers: res.headers }
+      if (allow.includes(res.status)) return { status: res.status, json, text, headers: res.headers }
       const detail = (json && (json.message || json.error)) || text.slice(0, 200) || `HTTP ${res.status}`
       throw new GithubError(`GitHub API 失败（${method} ${path}）：${detail}`, { status: res.status, body: json, path })
     }
@@ -153,10 +153,19 @@ export function createGithubClient({ token, apiBase = DEFAULT_API_BASE, fetchImp
       return json
     },
 
-    /** Resolve a branch to its commit sha, or `null` when the branch does not exist. */
+    /**
+     * Resolve a branch to its commit sha, or `null` when it does not exist yet.
+     *
+     * Two statuses mean "nothing here": 404 for a repository that has history
+     * but no such branch, and **409 `Git Repository is empty.`** for one with
+     * no commits at all — the shape a freshly created backup repository has,
+     * and the case the very first push has to survive.
+     */
     async getBranchHead(owner, repo, branch) {
-      const { status, json } = await request('GET', `/repos/${enc(owner)}/${enc(repo)}/git/ref/heads/${enc(branch)}`, { allow404: true })
-      if (status === 404) return null
+      const { status, json } = await request('GET', `/repos/${enc(owner)}/${enc(repo)}/git/ref/heads/${enc(branch)}`, {
+        allow: [404, 409],
+      })
+      if (status === 404 || status === 409) return null
       return json && json.object ? json.object.sha : null
     },
 
