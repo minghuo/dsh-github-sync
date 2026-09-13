@@ -151,6 +151,12 @@ window.__ModuleLoader__.load({
       cancel: '取消',
       restoreDone: '恢复完成',
       restorePreview: '将写入 {n} 个文件',
+      restoreWritten: '已写入',
+      restoreSkipped: '跳过',
+      restoreUnchanged: '未变',
+      restoreNothingToDo: '本地内容与云端完全一致，没有需要写入的文件',
+      restoreAllSkipped: '本地已有同名文件且未允许覆盖 —— 打开「覆盖本机同名文件」再试',
+      restoreForce: '仍然恢复（本机自己的备份）',
       snapshotTitle: '本地快照',
       snapshotHint: '快照只存在本机，用于快速回滚；云端备份是另一条独立链路。',
       snapshotNow: '立即快照',
@@ -251,6 +257,12 @@ window.__ModuleLoader__.load({
       cancel: 'Cancel',
       restoreDone: 'Restore complete',
       restorePreview: '{n} files will be written',
+      restoreWritten: 'written',
+      restoreSkipped: 'skipped',
+      restoreUnchanged: 'unchanged',
+      restoreNothingToDo: 'local content already matches the backup — nothing to write',
+      restoreAllSkipped: 'same-named local files exist and overwriting is off — enable “Overwrite local files” and retry',
+      restoreForce: 'Restore anyway (this is my own backup)',
       snapshotTitle: 'Local snapshots',
       snapshotHint: 'Snapshots live only on this machine, for fast rollback; the cloud backup is a separate path.',
       snapshotNow: 'Snapshot now',
@@ -398,6 +410,7 @@ window.__ModuleLoader__.load({
       const [error, setError] = useState('')
       const [restore, setRestore] = useState(null)
       const [preview, setPreview] = useState(null)
+      const [outcome, setOutcome] = useState(null)
       const [viewer, setViewer] = useState(null)
       const [expanded, setExpanded] = useState({})
       const [verifyResult, setVerifyResult] = useState(null)
@@ -424,10 +437,18 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * Refresh server state.
+       *
+       * `draft` holds *only local edits* and is deliberately left alone here: it
+       * used to be seeded with the whole server section, and since the render
+       * merge is `{...server, ...draft}`, any derived field it captured (notably
+       * `hasToken`) then shadowed the fresh server value forever — a saved token
+       * kept displaying "not configured" until the page was reloaded.
+       */
       const loadStatus = async () => {
         const next = await get('/status')
         setStatus(next)
-        setDraft((current) => ({ ...next.settings, ...current }))
         return next
       }
 
@@ -441,9 +462,11 @@ window.__ModuleLoader__.load({
       const save = () => run('save', async () => {
         const body = { ...draft }
         if (tokenInput !== '') body.token = tokenInput
-        const saved = await put('/settings', body)
+        await put('/settings', body)
         setTokenInput('')
-        setDraft((current) => ({ ...saved.settings, ...current }))
+        // Everything the draft held is now persisted, so drop it and let the
+        // server's own view drive the form again.
+        setDraft({})
         await loadStatus()
         notify(t('saved'))
       })
@@ -505,6 +528,7 @@ window.__ModuleLoader__.load({
 
       const openRestore = (instanceId, workspace) => {
         setPreview(null)
+        setOutcome(null)
         setRestore({ instanceId, workspace: workspace || '', map: '', overwrite: true })
       }
 
@@ -518,18 +542,38 @@ window.__ModuleLoader__.load({
         setPreview(result)
       })
 
-      const doRestore = () => run('restore', async () => {
-        const result = await post('/sessions/restore', {
-          instanceId: restore.instanceId,
-          workspace: restore.workspace || undefined,
-          map: restore.map && restore.workspace ? { [restore.workspace]: restore.map } : undefined,
-          overwrite: restore.overwrite,
-        })
-        setRestore(null)
-        setPreview(null)
-        await loadLocalSessions()
-        await loadStatus()
-        notify(`${t('restoreDone')}：${result.written.length}`)
+      /**
+       * Run the restore and keep the outcome **in the panel**.
+       *
+       * The panel used to close on success and report only through a toast, so a
+       * restore that wrote nothing (or a refused one) looked exactly like a click
+       * that did nothing at all.
+       */
+      const doRestore = (force = false) => run('restore', async () => {
+        try {
+          const result = await post('/sessions/restore', {
+            instanceId: restore.instanceId,
+            workspace: restore.workspace || undefined,
+            map: restore.map && restore.workspace ? { [restore.workspace]: restore.map } : undefined,
+            overwrite: restore.overwrite,
+            force,
+          })
+          setPreview(null)
+          setOutcome({
+            ok: true,
+            written: result.written.length,
+            skipped: result.skipped.length,
+            unchanged: result.unchanged.length,
+            safetySnapshot: result.safetySnapshot,
+            skippedReasons: result.skipped.slice(0, 3),
+          })
+          await loadLocalSessions()
+          await loadStatus()
+          notify(`${t('restoreDone')}：${result.written.length}`)
+        } catch (error) {
+          const message = String((error && error.message) || error)
+          setOutcome({ ok: false, error: message, offerForce: /本机自己的备份/.test(message) })
+        }
       })
 
       const openViewer = (query) => run('viewer', async () => {
@@ -537,7 +581,7 @@ window.__ModuleLoader__.load({
         setViewer(text)
       })
 
-      const settings = status ? { ...status.settings, ...draft } : draft
+      const settings = visibleSettings(status, draft)
       const configured = status ? status.configured : false
       const localWorkspaces = (localSessions && localSessions.workspaces) || []
 
@@ -736,10 +780,35 @@ window.__ModuleLoader__.load({
                     h('option', { key: workspace.key, value: workspace.key }, workspace.path || workspace.key))))
                 : null,
               preview ? h('p', { className: 'dgs-hint' }, t('restorePreview', { n: preview.files.length })) : null,
+              outcome
+                ? h('div', { className: outcome.ok ? 'dgs-note dgs-ok' : 'dgs-note dgs-warn' },
+                  outcome.ok
+                    ? [
+                      `${t('restoreWritten')} ${outcome.written}`,
+                      `${t('restoreSkipped')} ${outcome.skipped}`,
+                      `${t('restoreUnchanged')} ${outcome.unchanged}`,
+                      outcome.written === 0 && outcome.skipped === 0
+                        ? ` —— ${t('restoreNothingToDo')}`
+                        : outcome.written === 0
+                          ? ` —— ${t('restoreAllSkipped')}`
+                          : '',
+                    ].join(' · ')
+                    : h('span', null,
+                      outcome.error,
+                      outcome.offerForce
+                        ? h(Button, {
+                          variant: 'outline',
+                          size: 'sm',
+                          style: { marginLeft: '8px' },
+                          onClick: () => doRestore(true),
+                          disabled: busy !== '',
+                        }, t('restoreForce'))
+                        : null))
+                : null,
               h('div', { className: 'dgs-row' },
                 h(Button, { variant: 'outline', size: 'sm', onClick: doPreview, disabled: busy !== '' }, busy === 'preview' ? t('previewing') : t('preview')),
-                h(Button, { variant: 'primary', size: 'sm', onClick: doRestore, disabled: busy !== '' }, t('confirmRestore')),
-                h(Button, { variant: 'outline', size: 'sm', onClick: () => { setRestore(null); setPreview(null) } }, t('cancel'))))
+                h(Button, { variant: 'primary', size: 'sm', onClick: () => doRestore(false), disabled: busy !== '' }, t('confirmRestore')),
+                h(Button, { variant: 'outline', size: 'sm', onClick: () => { setRestore(null); setPreview(null); setOutcome(null) } }, t('cancel'))))
             : null),
 
         tab === 'snapshots' && h('div', { className: 'dgs-panes' },
@@ -805,6 +874,20 @@ window.__ModuleLoader__.load({
     function workspaceLabel(workspace) {
       const path = (workspace && workspace.path) || decodeWorkspace(workspace && workspace.key)
       return workspace && workspace.pathIsExact === false ? `≈ ${path}` : path
+    }
+
+    /**
+     * What the form shows: the server's view of the settings with the user's
+     * unsaved edits on top.
+     *
+     * `hasToken` is stripped from the draft on purpose. It is not a setting the
+     * user edits — it is derived by the host from the stored token — and a draft
+     * that carries a stale copy of it would shadow the fresh server value, leaving
+     * a saved token displayed as "not configured" until the page was reloaded.
+     */
+    function visibleSettings(status, draft) {
+      const { hasToken, ...edits } = draft || {}
+      return { ...((status && status.settings) || {}), ...edits }
     }
 
     /** Best-effort readable form of a workspace folder key (display only). */
@@ -888,7 +971,7 @@ window.__ModuleLoader__.load({
     const plugin = {
       name: CLIENT_NAME,
       inject: ['slots', 'locale'],
-      __internals: { NS, ZH, EN, STYLE, STYLE_TAG_ID, ensureStyles, formatBytes, formatTime, decodeWorkspace },
+      __internals: { NS, ZH, EN, STYLE, STYLE_TAG_ID, ensureStyles, visibleSettings, formatBytes, formatTime, decodeWorkspace },
       apply(ctx) {
         let t = (key, vars) => {
           let out = EN[key] || key

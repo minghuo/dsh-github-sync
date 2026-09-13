@@ -96,6 +96,27 @@ function loadClientBundle() {
   return { registrations, plugin, ctx, slots, locales, effects, document }
 }
 
+test('a saved token is never shown as unconfigured because of a stale draft', () => {
+  const { plugin } = loadClientBundle()
+  const { visibleSettings } = plugin.__internals
+
+  const server = { settings: { repoUrl: 'acme/dsh-backup', branch: 'main', hasToken: true } }
+  // A draft seeded from an older status — the shape that used to shadow the
+  // fresh value and freeze the badge at "not configured".
+  const staleDraft = { hasToken: false, repoUrl: 'acme/dsh-backup' }
+  assert.equal(visibleSettings(server, staleDraft).hasToken, true)
+
+  // Local edits still apply; the server-owned field still comes from the server.
+  const edited = { ...staleDraft, branch: 'backup' }
+  assert.equal(visibleSettings(server, edited).branch, 'backup')
+  assert.equal(visibleSettings(server, edited).hasToken, true)
+
+  // Before the first status arrives the draft is all there is — but the
+  // server-owned field is never invented from it.
+  assert.equal(visibleSettings(null, { repoUrl: 'x' }).repoUrl, 'x')
+  assert.equal('hasToken' in visibleSettings(null, { hasToken: false }), false)
+})
+
 test('the stylesheet is injected as a <style> element, not as inert text', () => {
   const { plugin, document } = loadClientBundle()
   const { ensureStyles, STYLE_TAG_ID, STYLE } = plugin.__internals
