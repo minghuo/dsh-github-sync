@@ -269,7 +269,7 @@ export function sanitizeWorkspaceKey(key) {
  * @param {boolean} [options.dryRun]
  * @param {boolean} [options.allowSettings] gate for `settings.yaml` (caller decides)
  */
-export async function restoreFrom({ source, home = dshHome(), only = {}, overwrite = true, dryRun = false, allowSettings = false, workspaceMap = {} } = {}) {
+export async function restoreFrom({ source, home = dshHome(), only = {}, overwrite = true, dryRun = false, allowSettings = false, workspaceMap = {}, onProgress } = {}) {
   const listed = await source.list()
   const groups = only.groups && only.groups.length > 0 ? new Set(only.groups) : null
   const explicit = only.paths && only.paths.length > 0 ? new Set(only.paths) : null
@@ -308,8 +308,13 @@ export async function restoreFrom({ source, home = dshHome(), only = {}, overwri
     return { dryRun: true, files: planned.map((p) => ({ path: p.entry.path, to: displayPath(p.target.abs), size: p.entry.size })), written: [], unchanged: [], skipped }
   }
 
+  let handled = 0
   for (const { entry, target } of planned) {
     const buffer = await source.read(entry.path)
+    handled += 1
+    if (typeof onProgress === 'function') {
+      onProgress({ phase: 'write', done: handled, total: planned.length, current: entry.path })
+    }
     if (isCorruptSessionLog(entry.path, buffer)) {
       skipped.push({ path: entry.path, reason: '不是合法的 zstd 会话日志；写入它会让 dsh 无法启动，已跳过' })
       continue
@@ -356,6 +361,7 @@ export async function pushSnapshot({
   pullRequest = false,
   mergeMethod = 'squash',
   logger = () => {},
+  onProgress,
 }) {
   let head = await client.getBranchHead(owner, repo, branch)
   if (!head) {
@@ -394,6 +400,7 @@ export async function pushSnapshot({
   const updated = []
   const unchanged = []
   const treeEntries = []
+  let uploaded = 0
 
   for (const [path, file] of wanted) {
     let buffer
@@ -407,6 +414,10 @@ export async function pushSnapshot({
     }
     const blobSha = await client.createBlob(owner, repo, buffer)
     treeEntries.push({ path, mode: '100644', type: 'blob', sha: blobSha })
+    uploaded += 1
+    if (typeof onProgress === 'function') {
+      onProgress({ phase: 'upload', done: uploaded, total: wanted.size, current: path })
+    }
     if (existing) updated.push(path)
     else created.push(path)
   }
@@ -587,6 +598,93 @@ export async function remoteInventory({ client, owner, repo, branch = 'main' }) 
 
   const instances = [...byInstance.values()].sort((a, b) => String(a.instanceId).localeCompare(String(b.instanceId)))
   return { commit: head, commitDate, tree: map, instances, truncated }
+}
+
+// ── Comparison (what a push or a pull would change) ──────────────────────
+
+/** Which mirror group a repository path belongs to, or `null` for metadata. */
+export function groupOfPath(repoPath) {
+  const parts = String(repoPath).split('/')
+  if (parts[0] !== 'instances' || parts.length < 3) return null
+  return GROUPS.includes(parts[2]) ? parts[2] : null
+}
+
+/**
+ * Compare this machine's plan against the remote tree, per group.
+ *
+ * This is the read-only half of a sync: it answers "what would a push send"
+ * (`created` + `updated`), "what would a pull bring down" (`updated` +
+ * `deleted`, i.e. files the remote has and we do not) and "what is already
+ * identical" — the three questions a user asks before either direction.
+ *
+ * @returns `{ branch, head, truncated, groups: { [group]: {created, updated,
+ *   deleted, unchanged, createdPaths, updatedPaths, deletedPaths} } }`
+ */
+export async function compareWithRemote({
+  client,
+  owner,
+  repo,
+  branch = 'main',
+  instanceId,
+  plan,
+  extraFiles = [],
+  limit = 50,
+}) {
+  const head = await client.getBranchHead(owner, repo, branch)
+  let remoteMap = new Map()
+  let truncated = false
+  if (head) {
+    const commit = await client.getCommit(owner, repo, head)
+    const tree = await client.getTreeMap(owner, repo, commit.tree.sha)
+    remoteMap = tree.map
+    truncated = tree.truncated
+  }
+
+  const prefix = `${instancePrefix(instanceId)}/`
+  const wanted = new Map()
+  for (const file of [...plan.files, ...extraFiles]) wanted.set(file.repoPath, file)
+
+  const buckets = Object.fromEntries(GROUPS.map((group) => [group, { created: [], updated: [], deleted: [], unchanged: 0 }]))
+
+  for (const [path, file] of wanted) {
+    if (!path.startsWith(prefix)) continue
+    const group = groupOfPath(path)
+    if (!group) continue
+    const existing = remoteMap.get(path)
+    if (!existing) {
+      buckets[group].created.push(path)
+      continue
+    }
+    const buffer = file.content !== undefined ? Buffer.from(file.content) : await fsP.readFile(file.abs)
+    if (gitBlobSha(buffer) === existing.sha) buckets[group].unchanged += 1
+    else buckets[group].updated.push(path)
+  }
+
+  for (const path of remoteMap.keys()) {
+    if (!path.startsWith(prefix) || wanted.has(path)) continue
+    const group = groupOfPath(path)
+    if (!group) continue
+    // A group that is switched off is simply absent from the plan; its remote
+    // files are not deletions.
+    if (plan.totals && plan.totals[group] === 0) continue
+    buckets[group].deleted.push(path)
+  }
+
+  const groups = {}
+  for (const group of GROUPS) {
+    const b = buckets[group]
+    groups[group] = {
+      created: b.created.length,
+      updated: b.updated.length,
+      deleted: b.deleted.length,
+      unchanged: b.unchanged,
+      createdPaths: b.created.slice(0, limit),
+      updatedPaths: b.updated.slice(0, limit),
+      deletedPaths: b.deleted.slice(0, limit),
+      truncated: b.created.length > limit || b.updated.length > limit || b.deleted.length > limit,
+    }
+  }
+  return { branch, head, truncated, groups }
 }
 
 // ── Local snapshots ──────────────────────────────────────────────────────

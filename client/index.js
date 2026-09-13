@@ -153,6 +153,36 @@ const ZH = {
   regroupPick: '选择本机工作区…',
   regroupAction: '归入该分组',
   regroupDone: '已移动会话',
+  compare: '与云端比较',
+  compareTitle: '与云端比较',
+  compareHint: '列出「推送会传什么」与「拉取会取什么」；推送=本机覆盖云端，拉取=用云端覆盖本机（同名文件按「覆盖本机同名文件」开关决定）。',
+  comparePush: '可推送',
+  comparePull: '可拉取',
+  pushAction: '推送',
+  pullAction: '拉取',
+  pullDone: '拉取完成',
+  filesInPlan: '个文件',
+  progressSync: '正在同步到云端',
+  progressRestore: '正在从云端还原',
+  phase_准备: '准备',
+  phase_检查仓库: '检查仓库',
+  phase_盘点本机文件: '盘点本机文件',
+  phase_上传: '上传',
+  phase_读取云端: '读取云端',
+  phase_拍本地快照: '拍本地快照',
+  phase_write: '写入本机',
+  tabPlugins: '插件',
+  pluginsTitle: '本机插件清单',
+  pluginsHint: '各 profile 声明的依赖与补丁层；「bundle」标记表示它会被挂载成插件层。',
+  pluginsDeps: '个依赖',
+  pluginsBundles: '个插件层',
+  pluginsNotInstalled: '未安装',
+  pluginsBundleTag: 'bundle',
+  pluginsMissingTitle: '云端有、本机没有的插件',
+  pluginsMissingHint: '这些是别的机器在用的插件，按对应命令安装后重启 dsh web 生效。',
+  pluginsMissingNone: '没有缺失的插件——本机与云端的插件清单一致。',
+  copy: '复制',
+  copyCommand: '已复制命令',
   snapshotTitle: '本地快照',
   snapshotHint: '快照只存在本机，用于快速回滚；云端备份是另一条独立链路。',
   snapshotNow: '立即快照',
@@ -265,6 +295,36 @@ const EN = {
   regroupPick: 'Choose a local workspace…',
   regroupAction: 'Move into that group',
   regroupDone: 'Sessions moved',
+  compare: 'Compare with cloud',
+  compareTitle: 'Compare with cloud',
+  compareHint: 'Shows what a push would send and what a pull would bring back. Push = this machine overwrites the cloud; pull = the cloud overwrites this machine (same-named files follow the “Overwrite local files” switch).',
+  comparePush: 'to push',
+  comparePull: 'to pull',
+  pushAction: 'Push',
+  pullAction: 'Pull',
+  pullDone: 'Pull complete',
+  filesInPlan: 'files',
+  progressSync: 'Syncing to the cloud',
+  progressRestore: 'Restoring from the cloud',
+  phase_准备: 'preparing',
+  phase_检查仓库: 'checking repository',
+  phase_盘点本机文件: 'listing local files',
+  phase_上传: 'uploading',
+  phase_读取云端: 'reading the cloud',
+  phase_拍本地快照: 'taking a local snapshot',
+  phase_write: 'writing locally',
+  tabPlugins: 'Plugins',
+  pluginsTitle: 'Local plugin manifests',
+  pluginsHint: 'Dependencies and patch layers declared per profile; a “bundle” tag means it mounts as a plugin layer.',
+  pluginsDeps: 'deps',
+  pluginsBundles: 'layers',
+  pluginsNotInstalled: 'not installed',
+  pluginsBundleTag: 'bundle',
+  pluginsMissingTitle: 'In the cloud, missing here',
+  pluginsMissingHint: 'Plugins another machine uses. Run the matching command, then restart dsh web.',
+  pluginsMissingNone: 'Nothing missing — this machine and the cloud declare the same plugins.',
+  copy: 'Copy',
+  copyCommand: 'Command copied',
   snapshotTitle: 'Local snapshots',
   snapshotHint: 'Snapshots live only on this machine, for fast rollback; the cloud backup is a separate path.',
   snapshotNow: 'Snapshot now',
@@ -416,6 +476,9 @@ function SettingsSection({ t }) {
   const [viewer, setViewer] = useState(null)
   const [expanded, setExpanded] = useState({})
   const [regroupTarget, setRegroupTarget] = useState({})
+  const [progress, setProgress] = useState(null)
+  const [plugins, setPlugins] = useState(null)
+  const [compare, setCompare] = useState(null)
   const [verifyResult, setVerifyResult] = useState(null)
   const toastTimer = useRef(null)
 
@@ -507,6 +570,7 @@ function SettingsSection({ t }) {
       if (!remote) loadRemote()
     }
     if (tab === 'snapshots' && snapshots.length === 0) loadSnapshots()
+    if (tab === 'plugins' && !plugins) loadPlugins()
   }, [tab])
 
   const makeSnapshot = () => run('snapshot', async () => {
@@ -542,6 +606,48 @@ function SettingsSection({ t }) {
       overwrite: true,
     })
   }
+
+  /**
+   * A push or a pull of tens of megabytes runs for a minute or more while the
+   * request that started it stays open, so the page asks the host what it is
+   * doing instead of showing an opaque spinner.
+   */
+  useEffect(() => {
+    if (busy === '') {
+      setProgress(null)
+      return undefined
+    }
+    let stopped = false
+    const read = async () => {
+      try {
+        const next = await get('/progress')
+        if (!stopped) setProgress(next)
+      } catch {
+        /* the request that matters is still in flight */
+      }
+    }
+    read()
+    const timer = setInterval(read, 700)
+    return () => {
+      stopped = true
+      clearInterval(timer)
+    }
+  }, [busy])
+
+  const loadPlugins = () => run('plugins', async () => {
+    setPlugins(await get('/plugins'))
+  })
+
+  const loadCompare = () => run('compare', async () => {
+    setCompare(await get('/compare'))
+  })
+
+  const pull = (groups, paths) => run('pull', async () => {
+    const result = await post('/pull', { instanceId: (status && status.instanceId) || undefined, groups, paths })
+    await Promise.all([loadLocalSessions(), loadStatus(), loadCompare()])
+    notify(`${t('pullDone')}：${t('restoreWritten')} ${result.written.length} · ${t('restoreSkipped')} ${result.skipped.length}`)
+    if ((result.pluginSuggestions || []).length) notify(`${t('pluginsMissingTitle')}：${result.pluginSuggestions.length}`)
+  })
 
   const regroup = (from, to) => run('regroup', async () => {
     const result = await post('/sessions/regroup', { from, to })
@@ -610,10 +716,24 @@ function SettingsSection({ t }) {
         h('p', { className: 'dgs-hint' }, t('subtitle'))),
       h('div', { className: 'dgs-row' },
         h(Button, { variant: 'outline', size: 'sm', onClick: verify, disabled: !configured || busy !== '' }, busy === 'verify' ? t('verifying') : t('verify')),
+        h(Button, { variant: 'outline', size: 'sm', onClick: loadCompare, disabled: !configured || busy !== '' }, t('compare')),
         h(Button, { variant: 'primary', size: 'sm', onClick: syncNow, disabled: !configured || busy !== '' }, busy === 'sync' ? t('syncing') : t('syncNow')))),
 
+    // Live progress for whatever long operation is running.
+    progress && progress.op
+      ? h('div', { className: 'dgs-progress' },
+        h('div', { className: 'dgs-progress-track' },
+          h('span', {
+            className: 'dgs-progress-fill',
+            style: { width: `${progress.total ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 8}%` },
+          })),
+        h('span', { className: 'dgs-hint' },
+          `${t(progress.op === 'pull' || progress.op === 'restore' ? 'progressRestore' : 'progressSync')} · ${t(`phase_${progress.phase}`) || progress.phase}`,
+          progress.total ? ` · ${progress.done}/${progress.total}` : ''))
+      : null,
+
     h('nav', { className: 'dgs-tabs' },
-      ['overview', 'sessions', 'snapshots', 'advanced'].map((key) =>
+      ['overview', 'sessions', 'plugins', 'snapshots', 'advanced'].map((key) =>
         h('button', {
           key,
           type: 'button',
@@ -635,13 +755,55 @@ function SettingsSection({ t }) {
         status && status.lastResult
           ? h('div', { className: 'dgs-result' },
             h('div', { className: 'dgs-result-head' }, `${t('resultTitle')} · ${formatTime(status.lastResult.at)} · ${status.lastResult.repo}#${status.lastResult.branch}`),
+            // Sessions and plugins are reported apart — "12 changed" would hide
+            // whether anything needs installing.
+            ['sessions', 'plugins'].map((group) => {
+              const g = (status.lastResult.groups || {})[group]
+              if (!g) return null
+              return h('div', { key: group, className: 'dgs-row dgs-wrap' },
+                h('span', { className: 'dgs-strong' }, t(group === 'sessions' ? 'tabSessions' : 'togglePlugins')),
+                h('span', { className: 'dgs-pill' }, `${t('resultCreated')} ${g.created}`),
+                h('span', { className: 'dgs-pill' }, `${t('resultUpdated')} ${g.updated}`),
+                h('span', { className: 'dgs-pill' }, `${t('resultDeleted')} ${g.deleted}`),
+                h('span', { className: 'dgs-hint' }, `${g.files} ${t('filesInPlan')}`))
+            }),
             h('div', { className: 'dgs-row dgs-wrap' },
-              h('span', { className: 'dgs-pill' }, `${t('resultCreated')} ${status.lastResult.created}`),
-              h('span', { className: 'dgs-pill' }, `${t('resultUpdated')} ${status.lastResult.updated}`),
-              h('span', { className: 'dgs-pill' }, `${t('resultDeleted')} ${status.lastResult.deleted}`),
               h('span', { className: 'dgs-pill' }, `${t('resultUnchanged')} ${status.lastResult.unchanged}`),
-              status.lastResult.pr ? h('span', { className: 'dgs-pill dgs-pill-brand' }, `${t('resultPr')} #${status.lastResult.pr.number} · ${status.lastResult.pr.state}`) : null))
+              status.lastResult.pr ? h('span', { className: 'dgs-pill dgs-pill-brand' }, `${t('resultPr')} #${status.lastResult.pr.number} · ${status.lastResult.pr.state}`) : null),
+            (status.lastResult.pluginSuggestions || []).length
+              ? h('div', null,
+                h('div', { className: 'dgs-result-head' }, t('pluginsMissingTitle')),
+                status.lastResult.pluginSuggestions.map((item) =>
+                  h('div', { key: `${item.profile}/${item.name}`, className: 'dgs-row dgs-wrap' },
+                    h('span', { className: 'dgs-hint' }, `${item.profile} · ${item.name} · ${item.spec}`),
+                    h('code', { className: 'dgs-code' }, item.command))))
+              : null)
           : null),
+
+      compare
+        ? h(Card, { title: t('compareTitle'), hint: t('compareHint') },
+          ['sessions', 'plugins'].map((group) => {
+            const g = (compare.groups || {})[group]
+            if (!g) return null
+            return h('div', { key: group, className: 'dgs-list-item' },
+              h('div', { className: 'dgs-row dgs-between' },
+                h('span', { className: 'dgs-strong' }, t(group === 'sessions' ? 'tabSessions' : 'togglePlugins')),
+                h('span', { className: 'dgs-row dgs-wrap' },
+                  h('span', { className: 'dgs-pill' }, `${t('comparePush')} ${g.created + g.updated}`),
+                  h('span', { className: 'dgs-pill' }, `${t('comparePull')} ${g.updated + g.deleted}`),
+                  h('span', { className: 'dgs-pill' }, `${t('resultUnchanged')} ${g.unchanged}`))),
+              h('div', { className: 'dgs-row' },
+                h(Button, { variant: 'primary', size: 'sm', disabled: busy !== '', onClick: syncNow }, t('pushAction')),
+                h(Button, {
+                  variant: 'outline',
+                  size: 'sm',
+                  disabled: busy !== '',
+                  onClick: () => pull([group]),
+                }, t('pullAction'))),
+              [...(g.createdPaths || [])].slice(0, 4).map((p) => h('div', { key: p, className: 'dgs-hint' }, `+ ${p}`)),
+              [...(g.deletedPaths || [])].slice(0, 4).map((p) => h('div', { key: p, className: 'dgs-hint' }, `- ${p}`)))
+          }))
+        : null,
 
       h(Card, { title: t('repoCardTitle'), hint: t('repoHint') },
         h(Field, { label: t('repoUrlLabel') },
@@ -852,6 +1014,53 @@ function SettingsSection({ t }) {
             h(Button, { variant: 'outline', size: 'sm', onClick: () => { setRestore(null); setPreview(null); setOutcome(null) } }, t('cancel'))))
         : null),
 
+    tab === 'plugins' && h('div', { className: 'dgs-panes' },
+      h(Card, {
+        title: t('pluginsTitle'),
+        hint: t('pluginsHint'),
+        actions: [h(Button, { key: 'r', variant: 'outline', size: 'sm', onClick: loadPlugins, disabled: busy !== '' }, t('refresh'))],
+      },
+        !plugins
+          ? h('p', { className: 'dgs-hint' }, t('loading'))
+          : plugins.local.map((profile) =>
+            h('div', { key: profile.profile, className: 'dgs-list-item' },
+              h('div', { className: 'dgs-row dgs-between' },
+                h('span', { className: 'dgs-strong' }, profile.profile),
+                h('span', { className: 'dgs-hint' }, `${profile.packages.length} ${t('pluginsDeps')} · ${profile.bundles.length} ${t('pluginsBundles')}`)),
+              profile.packages.map((pkg) =>
+                h('div', { key: pkg.name, className: 'dgs-row dgs-between dgs-subrow' },
+                  h('span', null,
+                    h('span', { className: 'dgs-strong' }, pkg.name),
+                    h('span', { className: 'dgs-hint' }, ` ${pkg.installedVersion ? `v${pkg.installedVersion}` : t('pluginsNotInstalled')}`)),
+                  h('span', { className: 'dgs-row' },
+                    pkg.bundle ? h('span', { className: 'dgs-pill' }, t('pluginsBundleTag')) : null,
+                    h('span', { className: 'dgs-hint' }, pkg.spec))))))),
+
+      h(Card, { title: t('pluginsMissingTitle'), hint: t('pluginsMissingHint') },
+        !plugins
+          ? h('p', { className: 'dgs-hint' }, t('loading'))
+          : (plugins.suggestions || []).length === 0
+            ? h('p', { className: 'dgs-hint' }, t('pluginsMissingNone'))
+            : plugins.suggestions.map((item) =>
+              h('div', { key: `${item.profile}/${item.name}`, className: 'dgs-list-item' },
+                h('div', { className: 'dgs-row dgs-between' },
+                  h('span', null,
+                    h('span', { className: 'dgs-strong' }, item.name),
+                    h('span', { className: 'dgs-hint' }, ` · ${item.profile} · ${item.spec}`)),
+                  h(Button, {
+                    variant: 'outline',
+                    size: 'sm',
+                    onClick: () => {
+                      writeClipboard(item.command)
+                      notify(`${t('copyCommand')}：${item.command}`)
+                    },
+                  }, t('copy'))),
+                h('code', { className: 'dgs-code' }, item.command)))),
+
+      plugins && plugins.configured === false
+        ? h('p', { className: 'dgs-hint' }, t('notConfigured'))
+        : null),
+
     tab === 'snapshots' && h('div', { className: 'dgs-panes' },
       h(Card, { title: t('snapshotNow'), hint: t('snapshotHint') },
         h('div', { className: 'dgs-row' },
@@ -931,6 +1140,23 @@ function visibleSettings(status, draft) {
   return { ...((status && status.settings) || {}), ...edits }
 }
 
+/** Copy helper: the shell's clipboard writer when present, the DOM API otherwise. */
+function writeClipboard(text) {
+  try {
+    if (P && typeof P.writeClipboard === 'function') {
+      P.writeClipboard(text)
+      return
+    }
+  } catch {
+    /* fall through to the DOM API */
+  }
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) navigator.clipboard.writeText(text)
+  } catch {
+    /* clipboard is unavailable — the command is visible either way */
+  }
+}
+
 /** Last path segment of a project directory — how the same project is recognised across machines. */
 function workspaceTitle(path) {
   return String(path || '')
@@ -1006,6 +1232,10 @@ const STYLE = `
 .dgs-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
 .dgs-stat { background: var(--dsw-alias-bg-layer-1); border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; }
 .dgs-note { margin: 0; }
+.dgs-progress { display: flex; flex-direction: column; gap: 6px; }
+.dgs-progress-track { height: 6px; border-radius: 999px; background: var(--dsw-alias-bg-layer-3); overflow: hidden; }
+.dgs-progress-fill { display: block; height: 100%; background: var(--dsw-alias-brand-primary, var(--dsw-alias-state-business-primary)); transition: width .3s ease; }
+.dgs-code { display: block; margin-top: 4px; padding: 6px 8px; border-radius: 6px; background: var(--dsw-alias-bg-layer-3); color: var(--dsw-alias-label-primary); font-family: var(--dsw-font-family-mono, ui-monospace, monospace); font-size: 12px; word-break: break-all; }
 .dgs-stat-value { font-weight: 600; word-break: break-all; }
 .dgs-stat-label { color: var(--dsw-alias-label-tertiary); font-size: var(--dsw-font-xs-13, 12px); }
 .dgs-result { border-top: 1px solid var(--dsw-alias-border-l2); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }

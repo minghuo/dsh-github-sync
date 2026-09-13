@@ -37,9 +37,12 @@ import zlib from 'node:zlib'
 
 import { dshHome, displayPath, decodeWorkspaceKey, listProfiles, listWorkspaceDirs, workspacePathMap } from './paths.js'
 import { createGithubClient, parseRepoUrl, repoSlug } from './github.js'
+import { diffProfilePlugins, installCommand, readAllProfiles } from './plugins.js'
 import {
   MANIFEST_NAME,
   buildPlan,
+  compareWithRemote,
+  groupOfPath,
   createLocalSnapshot,
   instancePrefix,
   listLocalSnapshots,
@@ -556,6 +559,30 @@ export function apply(ctx, config = {}) {
 
   let syncRun = null
 
+  /**
+   * What the long operations are doing right now.
+   *
+   * A push or a restore of tens of megabytes runs for a minute or more, and
+   * the client's request only settles at the end — without this the page has
+   * nothing to show but a spinner. The client polls `/progress` while it
+   * waits, so the phases and the file counter are real, not decorative.
+   */
+  const progress = { op: null, phase: '', done: 0, total: 0, current: '', startedAt: 0, at: 0 }
+  const beginProgress = (op) => {
+    Object.assign(progress, { op, phase: '准备', done: 0, total: 0, current: '', startedAt: Date.now(), at: Date.now() })
+    return {
+      phase(phase, patch = {}) {
+        Object.assign(progress, { phase, at: Date.now() }, patch)
+      },
+      tick(update = {}) {
+        Object.assign(progress, update, { at: Date.now() })
+      },
+      end() {
+        Object.assign(progress, { op: null, phase: '', done: 0, total: 0, current: '', at: Date.now() })
+      },
+    }
+  }
+
   const requireClient = async () => {
     const settings = await readSettingsAsync()
     const parsed = parseRepoUrl(settings.repoUrl)
@@ -577,10 +604,12 @@ export function apply(ctx, config = {}) {
       const release = await acquireLock(lockFile)
       if (release === null) throw new Error('另一个同步进程正在运行，请稍后再试')
       const started = Date.now()
+      const watch = beginProgress('sync')
       try {
         await stateLoaded
         const instanceId = await ensureInstanceId()
         const { settings, parsed, client } = await requireClient()
+        watch.phase('检查仓库')
         const repo = await client.getRepo(parsed.owner, parsed.repo)
         if (repo && repo.private === false) {
           throw new Error('检测到公共仓库。会话与插件清单会带上本机路径与内容，必须使用私有仓库。')
@@ -589,6 +618,7 @@ export function apply(ctx, config = {}) {
         const groups = groupToggles(settings)
         const profiles = listFromCsv(settings.profiles)
         const excludeWorkspaces = listFromCsv(settings.excludeWorkspaces)
+        watch.phase('盘点本机文件')
         const plan = await buildPlan({
           home,
           instanceId,
@@ -619,6 +649,7 @@ export function apply(ctx, config = {}) {
           workspaces: await describeWorkspaces(home, plan),
         }
 
+        watch.phase('上传', { done: 0, total: plan.files.length + 1 })
         const report = await pushSnapshot({
           client,
           owner: parsed.owner,
@@ -629,6 +660,7 @@ export function apply(ctx, config = {}) {
           extraFiles: [{ repoPath: `${instancePrefix(instanceId)}/${MANIFEST_NAME}`, content: JSON.stringify(manifest, null, 2) }],
           pullRequest: settings.pullRequest === true,
           logger: (message) => log.warn(message),
+          onProgress: (update) => watch.tick({ phase: '上传', ...update }),
         })
 
         const result = {
@@ -648,6 +680,30 @@ export function apply(ctx, config = {}) {
           skipped: plan.skipped,
           bytes: plan.totals.bytes,
           pr: report.pr || null,
+          // Sessions and plugins are reported apart: they are different kinds
+          // of thing to act on, and a single "12 changed" number hides which.
+          groups: Object.fromEntries(
+            ['sessions', 'plugins', 'settings'].map((group) => [
+              group,
+              {
+                created: (report.created || []).filter((p) => groupOfPath(p) === group).length,
+                updated: (report.updated || []).filter((p) => groupOfPath(p) === group).length,
+                deleted: (report.deleted || []).filter((p) => groupOfPath(p) === group).length,
+                files: plan.totals[group] || 0,
+              },
+            ]),
+          ),
+        }
+
+        // What another machine has that this one does not — the actionable part
+        // of a plugin sync, since a manifest alone cannot install anything.
+        if (groups.plugins) {
+          try {
+            const plugins = await pluginReport({ client, owner: parsed.owner, repo: parsed.repo, branch: settings.branch || 'main', instanceId })
+            result.pluginSuggestions = plugins.suggestions
+          } catch (error) {
+            log.warn(`同步后读取插件清单失败：${error && error.message}`)
+          }
         }
         state.lastSyncAt = result.at
         state.lastResult = result
@@ -656,12 +712,88 @@ export function apply(ctx, config = {}) {
         log.info(`同步完成：新增 ${result.created} · 更新 ${result.updated} · 删除 ${result.deleted} · 未变 ${result.unchanged}`)
         return result
       } finally {
+        watch.end()
         release()
       }
     })().finally(() => {
       syncRun = null
     })
     return syncRun
+  }
+
+  /**
+   * Plugin manifests as the backup holds them: `{ [instanceId]: { [profile]: { packages } } }`.
+   * A profile's declaration is four small files, so reading them all is cheap
+   * enough to do on every report rather than caching something that can drift.
+   */
+  async function cloudPluginManifests({ client, owner, repo, inventory }) {
+    const out = {}
+    for (const [path, meta] of inventory.tree) {
+      const match = path.match(/^instances\/([^/]+)\/plugins\/([^/]+)\/package\.json$/)
+      if (!match) continue
+      const [, instanceId, profile] = match
+      const buffer = await client.getBlob(owner, repo, meta.sha).catch(() => null)
+      if (!buffer) continue
+      let manifest
+      try {
+        manifest = JSON.parse(buffer.toString('utf8'))
+      } catch {
+        continue
+      }
+      out[instanceId] = out[instanceId] || {}
+      out[instanceId][profile] = {
+        packages: Object.entries(manifest.dependencies || {}).map(([name, spec]) => ({ name, spec: String(spec) })),
+        bundles: (manifest.dsh && manifest.dsh.profile && manifest.dsh.profile.bundles) || [],
+      }
+    }
+    return out
+  }
+
+  /**
+   * Local plugins versus every machine's backup.
+   *
+   * `suggestions` is the part a user acts on: packages another machine has
+   * declared that this one does not, each with the command that installs it.
+   * A profile only exists on a machine that uses it, so the comparison runs
+   * per profile rather than globally.
+   */
+  async function pluginReport({ client, owner, repo, branch, instanceId }) {
+    const local = await readAllProfiles(home)
+    if (!client) return { local, cloud: {}, diff: {}, suggestions: [], configured: false }
+
+    const inventory = await remoteInventory({ client, owner, repo, branch })
+    const cloud = await cloudPluginManifests({ client, owner, repo, inventory })
+
+    // Union of what every *other* machine declares — what this one is missing.
+    const others = {}
+    for (const [id, profiles] of Object.entries(cloud)) {
+      if (id === instanceId) continue
+      for (const [profile, info] of Object.entries(profiles)) {
+        others[profile] = others[profile] || { packages: [] }
+        const seen = new Set(others[profile].packages.map((p) => p.name))
+        for (const pkg of info.packages) if (!seen.has(pkg.name)) others[profile].packages.push(pkg)
+      }
+    }
+
+    const diff = {}
+    for (const [id, profiles] of Object.entries(cloud)) {
+      diff[id] = diffProfilePlugins(local, profiles).profiles
+    }
+    const ownDiff = diffProfilePlugins(local, cloud[instanceId] || {})
+    const suggestions = []
+    for (const row of diffProfilePlugins(local, others).profiles) {
+      for (const pkg of row.added) suggestions.push({ profile: row.profile, ...pkg, command: installCommand(row.profile, pkg) })
+    }
+
+    return {
+      configured: true,
+      local,
+      cloud,
+      diff,
+      own: ownDiff.profiles,
+      suggestions,
+      instances: inventory.instances.map((i) => i.instanceId),
+    }
   }
 
   /**
@@ -760,6 +892,113 @@ export function apply(ctx, config = {}) {
                 snapshots: { count: snapshots.length, latest: snapshots[0] ? snapshots[0].name : null, bytes: snapshots.reduce((n, s) => n + s.bytes, 0) },
                 capabilities: { zstd: zstdAvailable(), settingsService: Boolean(settingsScope()) },
               })
+              return
+            }
+
+            // GET /progress — what a running push or pull is doing right now
+            if (method === 'GET' && route === `${API_PREFIX}/progress`) {
+              sendJson(res, 200, { ...progress, busy: syncRun !== null })
+              return
+            }
+
+            // GET /plugins — this machine's declared plugins, the backup's, and
+            // what is missing here with the command that installs it
+            if (method === 'GET' && route === `${API_PREFIX}/plugins`) {
+              const settings = await readSettingsAsync()
+              const parsed = parseRepoUrl(settings.repoUrl)
+              const client = parsed && settings.token ? createGithubClient({ token: settings.token }) : null
+              const report = await pluginReport({
+                client,
+                owner: parsed && parsed.owner,
+                repo: parsed && parsed.repo,
+                branch: settings.branch || 'main',
+                instanceId: await ensureInstanceId(),
+              })
+              sendJson(res, 200, report)
+              return
+            }
+
+            // GET /compare?instance= — the read-only diff behind a push or a pull
+            if (method === 'GET' && route === `${API_PREFIX}/compare`) {
+              const { settings, parsed, client } = await requireClient()
+              const instanceId = url.searchParams.get('instance') || (await ensureInstanceId())
+              const plan = await buildPlan({
+                home,
+                instanceId,
+                groups: groupToggles(settings),
+                profiles: listFromCsv(settings.profiles),
+                maxFileMb: Number(settings.maxFileMb) || 45,
+                excludeWorkspaces: listFromCsv(settings.excludeWorkspaces),
+              })
+              const manifest = {
+                version: 1,
+                instanceId,
+                hostname: hostname(),
+                platform: process.platform,
+                groups: groupToggles(settings),
+                totals: plan.totals,
+                skipped: plan.skipped,
+                workspaces: await describeWorkspaces(home, plan),
+              }
+              const comparison = await compareWithRemote({
+                client,
+                owner: parsed.owner,
+                repo: parsed.repo,
+                branch: settings.branch || 'main',
+                instanceId,
+                plan,
+                extraFiles: [{ repoPath: `${instancePrefix(instanceId)}/${MANIFEST_NAME}`, content: JSON.stringify(manifest, null, 2) }],
+              })
+              sendJson(res, 200, { instanceId, repo: repoSlug(parsed), ...comparison })
+              return
+            }
+
+            // POST /pull {instanceId, groups?, paths?, overwrite?} — bring the
+            // backup down onto this machine (the other half of a sync)
+            if (method === 'POST' && route === `${API_PREFIX}/pull`) {
+              const body = await readJsonBody(req)
+              const { settings, parsed, client } = await requireClient()
+              const instanceId = String(body.instanceId || '')
+              if (!instanceId) {
+                sendJson(res, 400, { error: '缺少 instanceId' })
+                return
+              }
+              const inventory = await remoteInventory({ client, owner: parsed.owner, repo: parsed.repo, branch: settings.branch || 'main' })
+              if (!inventory.tree.size) {
+                sendJson(res, 404, { error: '远端还没有任何备份' })
+                return
+              }
+              const only = { instanceId, groups: Array.isArray(body.groups) && body.groups.length ? body.groups : ['sessions', 'plugins'] }
+              if (Array.isArray(body.paths) && body.paths.length) only.paths = body.paths
+              if (body.workspace) only.workspace = String(body.workspace)
+
+              const watch = beginProgress('pull')
+              try {
+                watch.phase('读取云端')
+                const result = await restoreFrom({
+                  source: remoteSource({ client, owner: parsed.owner, repo: parsed.repo, treeMap: inventory.tree }),
+                  home,
+                  only,
+                  overwrite: body.overwrite !== false,
+                  allowSettings: body.allowSettings === true,
+                  workspaceMap: body.map && typeof body.map === 'object' ? body.map : {},
+                  onProgress: (update) => watch.tick({ phase: '写入本机', ...update }),
+                })
+                const response = { ...result, instanceId }
+                if (only.groups.includes('plugins')) {
+                  response.pluginSuggestions = (await pluginReport({
+                    client,
+                    owner: parsed.owner,
+                    repo: parsed.repo,
+                    branch: settings.branch || 'main',
+                    instanceId: await ensureInstanceId(),
+                  }).catch(() => ({ suggestions: [] }))).suggestions
+                  response.installHint = '插件清单已拉到本机；缺少的依赖用上面列出的命令安装，然后重启 dsh web。'
+                }
+                sendJson(res, 200, response)
+              } finally {
+                watch.end()
+              }
               return
             }
 
@@ -880,19 +1119,27 @@ export function apply(ctx, config = {}) {
                 return
               }
 
-              // Safety net: snapshot what is on disk *before* touching it.
-              const plan = await buildPlan({ home, instanceId: await ensureInstanceId(), groups: { sessions: true, plugins: false, settings: false } })
-              const safety = `pre-restore-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`
-              await createLocalSnapshot({ syncDir, name: safety, plan }).catch(() => {})
+              const watch = beginProgress('restore')
+              try {
+                // Safety net: snapshot what is on disk *before* touching it.
+                watch.phase('拍本地快照')
+                const plan = await buildPlan({ home, instanceId: await ensureInstanceId(), groups: { sessions: true, plugins: false, settings: false } })
+                const safety = `pre-restore-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`
+                await createLocalSnapshot({ syncDir, name: safety, plan }).catch(() => {})
 
-              const result = await restoreFrom({
-                source,
-                home,
-                only,
-                overwrite: body.overwrite !== false,
-                workspaceMap: map,
-              })
-              sendJson(res, 200, { ...result, safetySnapshot: safety })
+                watch.phase('读取云端')
+                const result = await restoreFrom({
+                  source,
+                  home,
+                  only,
+                  overwrite: body.overwrite !== false,
+                  workspaceMap: map,
+                  onProgress: (update) => watch.tick({ phase: '写入本机', ...update }),
+                })
+                sendJson(res, 200, { ...result, safetySnapshot: safety })
+              } finally {
+                watch.end()
+              }
               return
             }
 

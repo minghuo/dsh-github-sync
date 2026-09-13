@@ -1,6 +1,6 @@
 {
   "name": "dsh-github-sync",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "dsh 插件 · 用 GitHub 私有仓库多机同步：会话 sessions 备份与恢复、插件清单、设置；纯 REST（不需要 git 二进制），token 只写不回读，各机路径互不覆盖。",
   "license": "MIT",
   "type": "module",

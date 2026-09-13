@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 
 import {
   buildPlan,
+  compareWithRemote,
   pushSnapshot,
   remoteInventory,
   remoteSource,
@@ -271,6 +272,39 @@ test('a restore refuses a session log that is not a zstd frame', async () => {
   assert.match(result.skipped[0].reason, /不是合法的 zstd 会话日志/)
   await assert.rejects(fsp.access(join(custom, 'sessions', '--p--', 's1', 'session.jsonl.zstd')))
   assert.deepEqual([...await fsp.readFile(join(custom, 'sessions', '--p--', 's2', 'session.v3.jsonl.zstd'))], [...zstd()])
+})
+
+test('compareWithRemote says what a push would send and a pull would bring', async () => {
+  const home = await makeHome()
+  const gh = createFakeGithub()
+  const plan = await planFor(home)
+  await pushSnapshot({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE, plan })
+
+  const identical = await compareWithRemote({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE, plan })
+  assert.equal(identical.groups.sessions.created + identical.groups.sessions.updated, 0)
+  assert.equal(identical.groups.sessions.unchanged, 2)
+  assert.equal(identical.groups.plugins.unchanged, 2)
+
+  // One session changes locally → one thing to push, nothing to pull.
+  await fsp.writeFile(join(home, 'sessions', '--proj-a--', 'session-1', 'session.v3.jsonl.zstd'), zstd(7, 7, 7))
+  const dirty = await compareWithRemote({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE, plan: await planFor(home) })
+  assert.equal(dirty.groups.sessions.updated, 1)
+  assert.equal(dirty.groups.sessions.deleted, 0)
+  assert.equal(dirty.groups.sessions.updatedPaths[0].endsWith('session-1/session.v3.jsonl.zstd'), true)
+
+  // A session the backup has and this machine does not → something to pull.
+  await fsp.rm(join(home, 'sessions', '--proj-a--', 'session-2'), { recursive: true })
+  const removed = await compareWithRemote({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE, plan: await planFor(home) })
+  assert.equal(removed.groups.sessions.deleted, 1)
+  assert.match(removed.groups.sessions.deletedPaths[0], /session-2/)
+
+  // A switched-off group is absent from the plan, so its remote files are not
+  // reported as deletions.
+  const sessionsOff = await compareWithRemote({
+    client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE,
+    plan: await buildPlan({ home, instanceId: INSTANCE, groups: { sessions: false, plugins: true, settings: false } }),
+  })
+  assert.equal(sessionsOff.groups.sessions.deleted, 0)
 })
 
 // ── Local snapshots ─────────────────────────────────────────────────────
