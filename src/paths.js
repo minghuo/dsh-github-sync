@@ -145,6 +145,41 @@ export function profileExists(profile, home = dshHome()) {
 }
 
 /**
+ * Real project paths, keyed by the session folder name.
+ *
+ * `projectKey()` is lossy — `-`, `\` and `:` all encode to `-` — so a folder
+ * name cannot be decoded back into a path (`git-workspace\data-push` would
+ * come back as `git\workspace\data\push`). The harness's own workspace
+ * registry (`storages/workspace.json`) does carry the real paths, so that is
+ * the authoritative source; {@link decodeWorkspaceKey} stays only as the
+ * fallback for a machine whose registry we cannot read (a remote backup, for
+ * instance, which carries just a folder name).
+ *
+ * @returns a map from encoded folder name to `{ path, title }`.
+ */
+export async function workspacePathMap(home = dshHome()) {
+  const raw = await fsP.readFile(join(home, 'storages', 'workspace.json'), 'utf8').catch(() => null)
+  if (!raw) return new Map()
+  let doc
+  try {
+    doc = JSON.parse(raw)
+  } catch {
+    return new Map()
+  }
+  const table = doc && doc.tables && doc.tables.workspaces
+  if (!table || typeof table !== 'object') return new Map()
+  const map = new Map()
+  for (const entry of Object.values(table)) {
+    if (!entry || typeof entry.path !== 'string' || entry.path === '') continue
+    map.set(encodeWorkspaceKey(entry.path), {
+      path: entry.path,
+      title: typeof entry.title === 'string' && entry.title !== '' ? entry.title : undefined,
+    })
+  }
+  return map
+}
+
+/**
  * Files inside a session directory that are not part of the session: local
  * caches, locks and half-written temporaries. Everything else is copied
  * byte-for-byte, including older log generations.

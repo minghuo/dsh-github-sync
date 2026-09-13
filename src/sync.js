@@ -502,7 +502,25 @@ export async function remoteInventory({ client, owner, repo, branch = 'main' }) 
         info.manifest = null
       }
     }
-    info.workspaces = [...info.workspaces.values()].sort((a, b) => b.bytes - a.bytes)
+    // The manifest is the only place a remote machine's real project paths
+    // exist — a folder name alone cannot be decoded back into one.
+    const declared = new Map(
+      ((info.manifest && info.manifest.workspaces) || [])
+        .filter((w) => w && typeof w.key === 'string')
+        .map((w) => [w.key, w]),
+    )
+    info.workspaces = [...info.workspaces.values()]
+      .map((w) => {
+        const meta = declared.get(w.key)
+        return {
+          ...w,
+          path: (meta && meta.path) || undefined,
+          // Only a manifest that says so carries a registry-derived path;
+          // older manifests stored a decoded guess under the same key.
+          pathIsExact: Boolean(meta && meta.path && meta.pathIsExact === true),
+        }
+      })
+      .sort((a, b) => b.bytes - a.bytes)
   }
 
   const instances = [...byInstance.values()].sort((a, b) => String(a.instanceId).localeCompare(String(b.instanceId)))

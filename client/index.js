@@ -653,7 +653,7 @@ function SettingsSection({ t }) {
                   className: 'dgs-disclosure',
                   onClick: () => setExpanded((current) => ({ ...current, [workspace.key]: !current[workspace.key] })),
                 },
-                h('span', { className: 'dgs-strong' }, workspace.path || workspace.key),
+                h('span', { className: 'dgs-strong' }, workspaceLabel(workspace)),
                 h('span', { className: 'dgs-hint' }, `${workspace.sessionCount} ${t('sessionsCount')} · ${formatBytes(workspace.bytes)}`)),
                 expanded[workspace.key]
                   ? h('div', { className: 'dgs-sublist' }, workspace.sessions.map((session) =>
@@ -687,7 +687,7 @@ function SettingsSection({ t }) {
                       `${instance.sessionCount} ${t('sessionsCount')} · ${formatBytes(instance.sessionBytes)} · ${formatBytes(instance.bytes)}`)),
                   instance.workspaces.map((workspace) =>
                     h('div', { key: workspace.key, className: 'dgs-row dgs-between dgs-subrow' },
-                      h('span', { title: workspace.key }, decodeWorkspace(workspace.key)),
+                      h('span', { title: workspace.key }, workspaceLabel(workspace)),
                       h('span', { className: 'dgs-row' },
                         h('span', { className: 'dgs-hint' }, `${workspace.sessions} · ${formatBytes(workspace.bytes)}`),
                         h(Button, {
@@ -708,7 +708,7 @@ function SettingsSection({ t }) {
         ? h(Card, { title: t('restoreTitle'), hint: t('restoreHint') },
           h('div', { className: 'dgs-row dgs-wrap' },
             h('span', { className: 'dgs-pill' }, restore.instanceId),
-            restore.workspace ? h('span', { className: 'dgs-pill' }, decodeWorkspace(restore.workspace)) : null),
+            restore.workspace ? h('span', { className: 'dgs-pill' }, `≈ ${decodeWorkspace(restore.workspace)}`) : null),
           h(Toggle, {
             label: t('restoreOverwrite'),
             checked: restore.overwrite,
@@ -786,6 +786,17 @@ function SettingsSection({ t }) {
   )
 }
 
+/**
+ * What to print for a workspace. The host sends the registry's real path when
+ * it could read it; otherwise the value is decoded from the folder name, which
+ * is lossy (`git-workspace\data-push` decodes to `git\workspace\data\push`), so
+ * it is marked approximate rather than presented as fact.
+ */
+function workspaceLabel(workspace) {
+  const path = (workspace && workspace.path) || decodeWorkspace(workspace && workspace.key)
+  return workspace && workspace.pathIsExact === false ? `≈ ${path}` : path
+}
+
 /** Best-effort readable form of a workspace folder key (display only). */
 function decodeWorkspace(key) {
   let s = String(key || '')
@@ -811,6 +822,10 @@ const STYLE = `
 .dgs-panes { display: flex; flex-direction: column; gap: 18px; }
 .dgs-card { border: 1px solid var(--dsw-alias-border-l2); border-radius: 12px; background: var(--dsw-alias-bg-layer-2); padding: 18px; display: flex; flex-direction: column; gap: 16px; }
 .dgs-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+/* The trailing control is a button: without this it shrinks to one glyph per
+   line as soon as the title next to it is long. */
+.dgs-card-head > :last-child { flex: none; }
+.dgs-root button { white-space: nowrap; }
 .dgs-card-title { margin: 0; font-size: 14px; font-weight: 600; }
 .dgs-card-body { display: flex; flex-direction: column; gap: 16px; }
 .dgs-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
@@ -848,7 +863,9 @@ const STYLE = `
 .dgs-modal { width: min(880px, 92vw); max-height: 82vh; overflow: auto; background: var(--dsw-alias-bg-layer-2); border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; gap: 14px; box-shadow: var(--dsw-shadow-lv3); }
 @media (max-width: 620px) { .dgs-field-row { grid-template-columns: minmax(0, 1fr); } }
 .dgs-pre { margin: 0; padding: 10px; background: var(--dsw-alias-bg-layer-1); border-radius: 8px; max-height: 60vh; overflow: auto; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
-.dgs-toast { position: sticky; bottom: 0; align-self: flex-start; padding: 8px 12px; border-radius: 8px; background: var(--dsw-alias-bg-layer-3); box-shadow: var(--dsw-shadow-lv2); }
+/* Fixed, so a message is visible whichever tab is scrolled and from inside the
+   session viewer overlay. */
+.dgs-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 80; max-width: min(560px, 80vw); padding: 10px 14px; border-radius: 10px; background: var(--dsw-alias-bg-layer-3); border: 1px solid var(--dsw-alias-border-l1); box-shadow: var(--dsw-shadow-lv3); }
 `
 
 function SettingsSectionSlot({ __t }) {

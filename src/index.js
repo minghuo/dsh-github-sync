@@ -35,7 +35,7 @@ import { hostname } from 'node:os'
 import { join, relative, sep } from 'node:path'
 import zlib from 'node:zlib'
 
-import { dshHome, displayPath, decodeWorkspaceKey, listProfiles, listWorkspaceDirs } from './paths.js'
+import { dshHome, displayPath, decodeWorkspaceKey, listProfiles, listWorkspaceDirs, workspacePathMap } from './paths.js'
 import { createGithubClient, parseRepoUrl, repoSlug } from './github.js'
 import {
   MANIFEST_NAME,
@@ -233,6 +233,7 @@ async function acquireLock(lockFile) {
  * project folder, with its sessions, byte sizes and newest mtime.
  */
 async function localSessionInventory(home = dshHome()) {
+  const knownPaths = await workspacePathMap(home)
   const workspaces = []
   let totalSessions = 0
   let totalBytes = 0
@@ -282,9 +283,14 @@ async function localSessionInventory(home = dshHome()) {
     sessions.sort((a, b) => String(b.modifiedAt || '').localeCompare(String(a.modifiedAt || '')))
     totalSessions += sessions.length
     totalBytes += bytes
+    const known = knownPaths.get(workspace.key)
     workspaces.push({
       key: workspace.key,
-      path: decodeWorkspaceKey(workspace.key),
+      path: (known && known.path) || decodeWorkspaceKey(workspace.key),
+      title: known ? known.title : undefined,
+      // False when the value came from decoding a lossy folder name, so the UI
+      // can say "≈" instead of presenting a guess as the real path.
+      pathIsExact: Boolean(known),
       sessions,
       sessionCount: sessions.length,
       bytes,
@@ -611,19 +617,39 @@ export function apply(ctx, config = {}) {
     return syncRun
   }
 
-  /** Per-workspace summary derived from a plan, for the remote manifest. */
+  /**
+   * Per-workspace summary derived from a plan, for the remote manifest.
+   * The path comes from the workspace registry when it is readable, so the
+   * other machine sees the real project path rather than a lossy guess.
+   */
   async function describeWorkspaces(homeDir, plan) {
+    const knownPaths = await workspacePathMap(homeDir)
     const byWorkspace = new Map()
     for (const file of plan.files) {
       if (file.group !== 'sessions') continue
       const parts = file.repoPath.split('/')
       const key = parts[3]
-      if (!byWorkspace.has(key)) byWorkspace.set(key, { key, path: decodeWorkspaceKey(key), sessions: new Set(), bytes: 0 })
+      if (!byWorkspace.has(key)) {
+        const known = knownPaths.get(key)
+        byWorkspace.set(key, {
+          key,
+          path: (known && known.path) || decodeWorkspaceKey(key),
+          pathIsExact: Boolean(known),
+          sessions: new Set(),
+          bytes: 0,
+        })
+      }
       const entry = byWorkspace.get(key)
       entry.sessions.add(parts[4])
       entry.bytes += file.size
     }
-    return [...byWorkspace.values()].map((w) => ({ key: w.key, path: w.path, sessions: w.sessions.size, bytes: w.bytes }))
+    return [...byWorkspace.values()].map((w) => ({
+      key: w.key,
+      path: w.path,
+      pathIsExact: w.pathIsExact,
+      sessions: w.sessions.size,
+      bytes: w.bytes,
+    }))
   }
 
   // ── Auto sync ──────────────────────────────────────────────────────────
