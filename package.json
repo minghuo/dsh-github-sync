@@ -49,7 +49,11 @@
   "devDependencies": {},
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/<owner>/dsh-github-sync.git"
+    "url": "git+https://github.com/minghuo/dsh-github-sync.git"
+  },
+  "homepage": "https://github.com/minghuo/dsh-github-sync#readme",
+  "bugs": {
+    "url": "https://github.com/minghuo/dsh-github-sync/issues"
   },
   "publishConfig": {
     "access": "public"
