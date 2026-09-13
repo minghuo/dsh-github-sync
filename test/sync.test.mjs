@@ -17,11 +17,15 @@ import {
   listLocalSnapshots,
   pruneLocalSnapshots,
   sanitizeSnapshotName,
+  SEED_FILE,
 } from '../src/sync.js'
 import { gitBlobSha, parseRepoUrl } from '../src/github.js'
 import { createFakeGithub } from './fake-github.mjs'
 
 const INSTANCE = 'laptop-a'
+
+/** Files this plugin owns — excludes the seed file it writes outside `instances/`. */
+const instanceFiles = (gh) => [...gh.files().keys()].filter((path) => path.startsWith('instances/'))
 
 /** A throwaway `$DSH_HOME` with sessions, plugin manifests and settings. */
 async function makeHome({ sessions = true, settings = true } = {}) {
@@ -110,7 +114,11 @@ test('pushSnapshot seeds an empty repository, then reports nothing to commit', a
   })
   assert.equal(first.pushed, true)
   assert.equal(first.created.length, 5)
-  assert.equal(gh.files().size, 5)
+  // The first commit cannot come from the Git Data API — the fake refuses those
+  // writes exactly as GitHub does — so it must have gone through the Contents API.
+  assert.deepEqual(gh.calls.find((c) => c[0] === 'putFile'), ['putFile', SEED_FILE])
+  assert.equal(instanceFiles(gh).length, 5)
+  assert.equal(gh.files().size, 6, 'the seed file is what gave the repository its first commit')
 
   const second = await pushSnapshot({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE, plan })
   assert.equal(second.pushed, false)
@@ -131,7 +139,7 @@ test('pushSnapshot uploads only what changed and prunes deleted sessions', async
   assert.deepEqual(report.updated, [`instances/${INSTANCE}/sessions/--proj-a--/session-1/session.v3.jsonl.zstd`])
   assert.deepEqual(report.deleted, [`instances/${INSTANCE}/sessions/--proj-a--/session-2/session.jsonl.zstd`])
   assert.equal(gh.calls.filter((c) => c[0] === 'createBlob').length - blobsAfterFirst, 1, 'unchanged plugin manifests are not re-uploaded')
-  assert.equal(gh.files().size, 3)
+  assert.equal(instanceFiles(gh).length, 3)
 })
 
 test('a disabled group is never deleted from the remote', async () => {
@@ -143,18 +151,19 @@ test('a disabled group is never deleted from the remote', async () => {
   const plan = await buildPlan({ home, instanceId: INSTANCE, groups: { sessions: false, plugins: true, settings: false } })
   const report = await pushSnapshot({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: INSTANCE, plan })
   assert.deepEqual(report.deleted ?? [], [])
-  assert.equal(gh.files().size, 4)
+  assert.equal(instanceFiles(gh).length, 4)
 })
 
 test('another machine\'s backup is never touched', async () => {
   const homeA = await makeHome()
   const gh = createFakeGithub()
   await pushSnapshot({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: 'laptop-a', plan: await buildPlan({ home: homeA, instanceId: 'laptop-a', groups: { sessions: true, plugins: true, settings: false } }) })
-  const afterA = gh.files().size
+  const afterA = instanceFiles(gh).length
 
   const homeB = await makeHome()
   await pushSnapshot({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main', instanceId: 'laptop-b', plan: await buildPlan({ home: homeB, instanceId: 'laptop-b', groups: { sessions: true, plugins: true, settings: false } }) })
-  assert.equal(gh.files().size, afterA * 2)
+  assert.equal(instanceFiles(gh).length, afterA * 2)
+  assert.equal(gh.files().size, afterA * 2 + 1, 'plus the seed file, which neither machine owns')
 
   const tree = await remoteInventory({ client: gh, owner: 'acme', repo: 'dsh-backup', branch: 'main' })
   assert.deepEqual(tree.instances.map((i) => i.instanceId).sort(), ['laptop-a', 'laptop-b'])

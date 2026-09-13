@@ -111,7 +111,19 @@ async function pushTree({ owner, repo, branch, message, verbose = true }) {
   // 409 as well as 404: a repository with no commits answers "Git Repository
   // is empty." instead of reporting a missing branch.
   const head = await gh('GET', `/repos/${owner}/${repo}/git/ref/heads/${branch}`, { allow: [404, 409] })
-  const headSha = head.status === 200 ? head.json.object.sha : null
+  let headSha = head.status === 200 ? head.json.object.sha : null
+
+  // Every Git Data write is refused until the repository has one commit, so a
+  // brand-new repository is seeded through the Contents API instead. The
+  // placeholder is deleted again by the same push that follows.
+  if (headSha === null && !dryRun) {
+    await gh('PUT', `/repos/${owner}/${repo}/contents/.dsh-seed`, {
+      body: { message: 'chore: 初始化仓库', content: Buffer.from('dsh-github-sync\n').toString('base64'), branch },
+    })
+    const seeded = await gh('GET', `/repos/${owner}/${repo}/git/ref/heads/${branch}`)
+    headSha = seeded.json.object.sha
+    if (verbose) console.log('  · 空仓库：已用 Contents API 创建初始提交')
+  }
 
   let baseTree
   let remoteMap = new Map()

@@ -223,6 +223,29 @@ export function createGithubClient({ token, apiBase = DEFAULT_API_BASE, fetchImp
       return json.sha
     },
 
+    /**
+     * Create or replace one file through the **Contents API**.
+     *
+     * This is the only way to make the *first* commit in a repository: every
+     * Git Data endpoint (blobs, trees, commits) answers 409 `Git Repository is
+     * empty.` until a commit exists, so a brand-new backup repository has to be
+     * seeded through this route before the batch push can take over.
+     */
+    async putFile(owner, repo, { path, content, message, branch }) {
+      const encoded = String(path)
+        .split('/')
+        .map((segment) => enc(segment))
+        .join('/')
+      const { json } = await request('PUT', `/repos/${enc(owner)}/${enc(repo)}/contents/${encoded}`, {
+        body: {
+          message,
+          content: Buffer.from(content).toString('base64'),
+          ...(branch ? { branch } : {}),
+        },
+      })
+      return json
+    },
+
     async createRef(owner, repo, branch, sha) {
       const { json } = await request('POST', `/repos/${enc(owner)}/${enc(repo)}/git/refs`, {
         body: { ref: `refs/heads/${branch}`, sha },

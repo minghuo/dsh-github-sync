@@ -9,6 +9,13 @@ import { createHash } from 'node:crypto'
 const blobSha = (buf) => createHash('sha1').update(Buffer.from(`blob ${buf.length}\0`)).update(buf).digest('hex')
 const objectSha = (seed) => createHash('sha1').update(seed).digest('hex')
 
+/** GitHub's answer for any Git Data write against a repository with no commits. */
+function emptyRepo() {
+  const error = new Error('Git Repository is empty.')
+  error.status = 409
+  return error
+}
+
 export function createFakeGithub({ branch = 'main', initialFiles = {} } = {}) {
   const blobs = new Map()
   const trees = new Map()
@@ -72,6 +79,8 @@ export function createFakeGithub({ branch = 'main', initialFiles = {} } = {}) {
     },
 
     async createBlob(owner, repo, content) {
+      // Mirrors GitHub: no Git Data write works before the first commit.
+      if (commits.size === 0) throw emptyRepo()
       const buf = Buffer.isBuffer(content) ? content : Buffer.from(content)
       const sha = blobSha(buf)
       blobs.set(sha, buf)
@@ -79,7 +88,22 @@ export function createFakeGithub({ branch = 'main', initialFiles = {} } = {}) {
       return sha
     },
 
+    /** The Contents API — the one route that can make a repository's first commit. */
+    async putFile(owner, repo, { path, content, message = 'seed', branch = 'main' }) {
+      const buf = Buffer.isBuffer(content) ? content : Buffer.from(content)
+      const sha = blobSha(buf)
+      blobs.set(sha, buf)
+      const tree = next('tree')
+      trees.set(tree, new Map([[path, { sha, size: buf.length }]]))
+      const commit = next('commit')
+      commits.set(commit, { tree, parents: [], message, committer: { date: new Date().toISOString() } })
+      refs.set(branch, commit)
+      calls.push(['putFile', path])
+      return { commit: { sha: commit }, content: { path } }
+    },
+
     async createTree(owner, repo, entries, baseTree) {
+      if (commits.size === 0) throw emptyRepo()
       const map = new Map(baseTree ? trees.get(baseTree) : [])
       for (const entry of entries) {
         if (entry.sha === null) map.delete(entry.path)
@@ -92,6 +116,7 @@ export function createFakeGithub({ branch = 'main', initialFiles = {} } = {}) {
     },
 
     async createCommit(owner, repo, { message, tree, parents }) {
+      if (commits.size === 0) throw emptyRepo()
       const sha = next('commit')
       commits.set(sha, { tree, parents, message, committer: { date: new Date().toISOString() } })
       calls.push(['createCommit', message])

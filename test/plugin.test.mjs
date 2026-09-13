@@ -90,15 +90,27 @@ function githubFetchServer(fake) {
         return send(404, { message: String(error.message) })
       }
     }
+    // GitHub refuses every Git Data write until the repository has a commit.
     if (method === 'POST' && /\/git\/blobs$/.test(path)) {
-      const content = Buffer.from(body.content, 'base64')
-      return send(201, { sha: await fake.createBlob(owner, repo, content) })
+      if (fake.commits.size === 0) return send(409, { message: 'Git Repository is empty.' })
+      return send(201, { sha: await fake.createBlob(owner, repo, Buffer.from(body.content, 'base64')) })
     }
     if (method === 'POST' && /\/git\/trees$/.test(path)) {
+      if (fake.commits.size === 0) return send(409, { message: 'Git Repository is empty.' })
       return send(201, { sha: await fake.createTree(owner, repo, body.tree, body.base_tree) })
     }
     if (method === 'POST' && /\/git\/commits$/.test(path)) {
+      if (fake.commits.size === 0) return send(409, { message: 'Git Repository is empty.' })
       return send(201, { sha: await fake.createCommit(owner, repo, body) })
+    }
+    if (method === 'PUT' && (m = match(/^\/repos\/[^/]+\/[^/]+\/contents\/(.+)$/))) {
+      const filePath = decodeURIComponent(m[1])
+      return send(201, await fake.putFile(owner, repo, {
+        path: filePath,
+        content: Buffer.from(body.content, 'base64'),
+        message: body.message,
+        branch: body.branch || 'main',
+      }))
     }
     if (method === 'POST' && /\/git\/refs$/.test(path)) {
       const name = String(body.ref).replace('refs/heads/', '')

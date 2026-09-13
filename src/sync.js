@@ -32,6 +32,31 @@ export const MANIFEST_NAME = 'manifest.json'
 /** Default per-file ceiling; GitHub rejects blobs above 100 MB. */
 export const DEFAULT_MAX_FILE_MB = 45
 
+/** The one file the Contents API writes to give an empty repository a commit. */
+export const SEED_FILE = 'README.md'
+
+/** Body of {@link SEED_FILE}: what this repository is and how it is laid out. */
+export function seedFileBody() {
+  return [
+    '# dsh 备份仓库',
+    '',
+    '这个仓库由 dsh 插件 `dsh-github-sync` 维护：把 dsh 的会话、插件清单与设置备份到私有仓库，',
+    '并可在另一台机器上按整机 / 工作区 / 单会话恢复。',
+    '',
+    '```',
+    'instances/<实例ID>/',
+    '  manifest.json   该机器的清单（主机名、分组、统计、工作区真实路径）',
+    '  sessions/…      会话日志，按工作区/会话目录逐字节复制（含各代日志）',
+    '  plugins/…       各 profile 的插件清单（package.json / cordis.patch.yml / 锁文件）',
+    '  settings/…      settings.yaml（可选，默认关闭）',
+    '```',
+    '',
+    '每台机器只写自己的 `instances/<实例ID>/`，互不覆盖，因此不需要合并。',
+    '本文件只用于让空仓库拥有第一个提交 —— 除它之外请勿手工编辑，同步会按磁盘状态覆盖。',
+    '',
+  ].join('\n')
+}
+
 /** `instances/<id>` prefix for one machine. */
 export function instancePrefix(instanceId) {
   return `instances/${instanceId}`
@@ -310,7 +335,22 @@ export async function pushSnapshot({
   mergeMethod = 'squash',
   logger = () => {},
 }) {
-  const head = await client.getBranchHead(owner, repo, branch)
+  let head = await client.getBranchHead(owner, repo, branch)
+  if (!head) {
+    // A repository with no commits cannot be written through the Git Data API
+    // at all — blobs, trees and commits all answer 409 `Git Repository is
+    // empty.` — so the first commit is made through the Contents API and the
+    // batch push continues from the commit it produces.
+    await client.putFile(owner, repo, {
+      path: SEED_FILE,
+      content: seedFileBody(),
+      message: 'dsh-github-sync: 初始化备份仓库',
+      branch,
+    })
+    head = await client.getBranchHead(owner, repo, branch)
+    logger('空仓库：已通过 Contents API 创建初始提交')
+    if (!head) throw new Error('仓库初始化后仍读不到分支，请检查令牌是否有 Contents: Read and write 权限')
+  }
   const commit = head ? await client.getCommit(owner, repo, head) : null
   const baseTree = commit ? commit.tree.sha : undefined
 
